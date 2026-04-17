@@ -90,11 +90,18 @@ jobs:
         if: ${{ env.test_patch != 'true' }}
         run: |
           sudo apt update -y
-          sudo apt-get install -y zip flex bison libncurses-dev gawk libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache
-          # USB/IP 用户态工具可能依赖 libsysfs，但 Android 环境下通常不需要，我们强制禁用
-          # 安装一些构建工具
-          sudo apt-get install -y automake libtool pkg-config
+          sudo apt-get install -y zip flex bison libncurses-dev gawk libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache automake libtool pkg-config
           sudo apt clean
+
+      # 启用 ccache 缓存，加速后续构建
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          create-symlink: true
+          key: kernel-usbip-build
+          restore-keys: |
+            kernel-usbip-build
+          max-size: '10G'
 
       - name: Clone Kernel Source (Android 16.0)
         if: ${{ env.test_patch != 'true' }}
@@ -202,17 +209,17 @@ jobs:
           make LLVM=1 LLVM_IAS=1 O=out olddefconfig
           make LLVM=1 LLVM_IAS=1 O=out -j$(nproc)
 
-      # ================ 编译 USB/IP 用户态工具 (Android 版本) ================
+      # ================ 编译 USB/IP 用户态工具 (Android 动态链接版本) ================
       - name: Build USB/IP userspace tools for Android
         if: ${{ env.test_patch != 'true' }}
         run: |
           cd "${{ env.CheckOut_DIR }}"
           
-          # 设置交叉编译环境变量
+          # 设置交叉编译环境变量，确保使用 Android GCC 且通过 ccache 加速
           export PATH=~/aarch64-linux-android-4.9/bin:$PATH
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-android-
-          export CC=aarch64-linux-android-gcc
+          export CC="ccache aarch64-linux-android-gcc"
           export LD=aarch64-linux-android-ld
           export AR=aarch64-linux-android-ar
           export STRIP=aarch64-linux-android-strip
@@ -221,29 +228,26 @@ jobs:
           cd tools/usb/usbip
           
           # 清理可能存在的旧构建文件
-          make clean || true
+          [ -f Makefile ] && make distclean || true
           
-          # 配置 autoreconf（如果需要）
-          ./autogen.sh || true
+          # 生成 configure 脚本
+          ./autogen.sh
           
-          # 针对 Android 环境进行配置：
-          # - 禁用 libsysfs（Android 通常无此库）
-          # - 使用交叉编译器
-          # - 指定主机类型为 aarch64-linux-android
-          # - 静态链接以避免运行时库依赖问题（可选，推荐静态链接）
+          # 配置编译选项：
+          # - 动态链接（默认），生成共享库
+          # - 禁用 libusb 和 libsysfs（Android 无这些库）
+          # - 指定主机类型
           ./configure \
             --host=aarch64-linux-android \
             --build=x86_64-pc-linux-gnu \
             --without-libusb \
             --without-libsysfs \
-            --disable-shared \
-            --enable-static \
-            CC=$CC \
-            LD=$LD \
-            AR=$AR \
-            STRIP=$STRIP \
-            CFLAGS="-static -O2 -fPIE" \
-            LDFLAGS="-static -pie"
+            CC="$CC" \
+            LD="$LD" \
+            AR="$AR" \
+            STRIP="$STRIP" \
+            CFLAGS="-O2 -fPIC" \
+            LDFLAGS="-Wl,-rpath,/system/lib64"
           
           # 编译
           make -j$(nproc)
@@ -251,12 +255,13 @@ jobs:
           # 收集产物到指定目录
           mkdir -p "${{ env.CheckOut_DIR }}/usbip-android-bin"
           cp src/usbip src/usbipd "${{ env.CheckOut_DIR }}/usbip-android-bin/"
-          # 如果也生成了动态库（尽管我们禁用了 shared，但以防万一）
+          # 收集生成的共享库（libusbip.so*）
           find . -name "*.so*" -exec cp {} "${{ env.CheckOut_DIR }}/usbip-android-bin/" \; 2>/dev/null || true
           
-          # 使用 Android strip 精简二进制
+          # 精简二进制（保留调试信息可后续去除，但 strip 后体积更小）
           aarch64-linux-android-strip "${{ env.CheckOut_DIR }}/usbip-android-bin/usbip" || true
           aarch64-linux-android-strip "${{ env.CheckOut_DIR }}/usbip-android-bin/usbipd" || true
+          aarch64-linux-android-strip "${{ env.CheckOut_DIR }}/usbip-android-bin/"*.so* || true
           
           echo "USB/IP Android binaries built successfully."
           ls -la "${{ env.CheckOut_DIR }}/usbip-android-bin/"

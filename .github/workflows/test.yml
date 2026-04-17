@@ -156,62 +156,47 @@ jobs:
           rm -rf rtl8188eus-repo
           echo "rtl8188eus driver source integrated."
 
-      # ========== 关键修复：将必要配置直接写入 defconfig 文件 ==========
+      # ========== 核心修复：将完整配置写入 defconfig 文件 ==========
       - name: 配置内核基础参数（写入 defconfig）
         run: |
           DEFCONFIG="${{ env.CheckOut_DIR }}/arch/arm64/configs/raphael_defconfig"
-          # 基础功能确保
           echo "CONFIG_MODULES=y" >> $DEFCONFIG
           echo "CONFIG_KPROBES=y" >> $DEFCONFIG
           echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
           echo "CONFIG_KPROBE_EVENTS=y" >> $DEFCONFIG
           echo "CONFIG_OVERLAY_FS=y" >> $DEFCONFIG
-          # 禁用 LTO（避免链接错误）
           sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/' $DEFCONFIG
           sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/' $DEFCONFIG
           sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/' $DEFCONFIG
           echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
           echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
-          # BPF 支持
           echo "CONFIG_BPF_JIT=y" >> $DEFCONFIG
           echo "# CONFIG_BPF_JIT_ALWAYS_ON is not set" >> $DEFCONFIG
           echo "CONFIG_BPF_SYSCALL=y" >> $DEFCONFIG
-          # 系统 V IPC（Android 必需）
           echo "CONFIG_SYSVIPC=y" >> $DEFCONFIG
           echo "CONFIG_SYSVIPC_SYSCTL=y" >> $DEFCONFIG
           echo "CONFIG_SYSVIPC_COMPAT=y" >> $DEFCONFIG
-          # 事件通知机制
           echo "CONFIG_EPOLL=y" >> $DEFCONFIG
           echo "CONFIG_EVENTFD=y" >> $DEFCONFIG
           echo "CONFIG_SIGNALFD=y" >> $DEFCONFIG
           echo "CONFIG_INOTIFY_USER=y" >> $DEFCONFIG
-          # 临时文件系统
           echo "CONFIG_SHMEM=y" >> $DEFCONFIG
           echo "CONFIG_TMPFS=y" >> $DEFCONFIG
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> $DEFCONFIG
           echo "CONFIG_TMPFS_XATTR=y" >> $DEFCONFIG
-          # USB/IP 支持（模块）
-          echo "CONFIG_USBIP_CORE=m" >> $DEFCONFIG
-          echo "CONFIG_USBIP_VHCI_HCD=m" >> $DEFCONFIG
-          echo "CONFIG_USBIP_HOST=m" >> $DEFCONFIG
-          # Section mismatch 警告放宽
+          echo "CONFIG_USBIP_CORE=y" >> $DEFCONFIG
+          echo "CONFIG_USBIP_VHCI_HCD=y" >> $DEFCONFIG
+          echo "CONFIG_USBIP_HOST=y" >> $DEFCONFIG
           echo "CONFIG_SECTION_MISMATCH_WARN_ONLY=y" >> $DEFCONFIG
-          # 背光支持
           echo "CONFIG_BACKLIGHT_CLASS_DEVICE=y" >> $DEFCONFIG
           echo "CONFIG_BACKLIGHT_QCOM=y" >> $DEFCONFIG
-          # 模块版本控制禁用（USB/IP 需要）
           echo "CONFIG_MODVERSIONS=n" >> $DEFCONFIG
-          # ZRAM + zstd 压缩
           echo "CONFIG_ZRAM=y" >> $DEFCONFIG
           echo "CONFIG_ZRAM_DEF_COMP_ZSTD=y" >> $DEFCONFIG
           echo "CONFIG_CRYPTO_ZSTD=y" >> $DEFCONFIG
-          # KernelSU (SukiSU-Ultra 使用 CONFIG_KERNELSU，但原版 KSU 使用 CONFIG_KSU，我们保留原方式，在后续 make 时再启用)
-          # 这里显式添加 KSU 相关基础依赖
           echo "CONFIG_KALLSYMS=y" >> $DEFCONFIG
           echo "CONFIG_KALLSYMS_ALL=y" >> $DEFCONFIG
-          # rtl8188eus 驱动（模块）
-          echo "CONFIG_RTL8188EU=m" >> $DEFCONFIG
-          # USB 串口驱动
+          echo "CONFIG_RTL8188EU=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL_CONSOLE=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL_GENERIC=y" >> $DEFCONFIG
@@ -241,7 +226,7 @@ jobs:
           path: /home/runner/r547379
           key: clang-r547379
 
-      - name: Prepare GCC toolchains (optional, for compatibility)
+      - name: Prepare GCC toolchains (optional)
         run: |
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/aarch64-linux-android-4.9
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/arm-linux-androideabi-4.9
@@ -260,22 +245,16 @@ jobs:
           
           cd "${{ env.CheckOut_DIR }}"
           
-          # 生成 .config（defconfig 已包含我们写入的所有配置）
           make LLVM=1 LLVM_IAS=1 O=out raphael_defconfig
-          
-          # 显式启用 KSU（KernelSU Next 使用的符号）
           ./scripts/config --file out/.config --enable KSU
-          
-          # 刷新配置
           make LLVM=1 LLVM_IAS=1 O=out olddefconfig
           
-          # 开始编译
           make LLVM=1 LLVM_IAS=1 CC="ccache clang" -j$(nproc) O=out
           
           ccache --show-stats
         shell: bash
 
-      - name: 编译 USB/IP 内核模块（可选，保留原功能）
+      - name: 编译 USB/IP 内核模块
         if: ${{ env.test_patch != 'true' }}
         run: |
           export CLANG_PATH=$HOME/r547379/bin
@@ -308,7 +287,7 @@ jobs:
           name: Raphael-Kernel_KSU_Dev_SOVIET-ANDROID_16
           path: ${{ env.AnyKernel }}/Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_16.zip
 
-      - name: Upload USB/IP modules (optional)
+      - name: Upload USB/IP modules
         if: ${{ env.test_patch != 'true' }}
         uses: actions/upload-artifact@v4
         with:

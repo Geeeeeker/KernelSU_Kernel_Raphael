@@ -41,12 +41,11 @@ jobs:
         run: |
           cp "$Setup_Dir/setup.sh" "$KernelSU_Dir/kernel/setup.sh"
           cd "$KernelSU_Dir"
-          # 保存版本信息到文件，便于后续解压后读取
+          # 保存版本信息到文件
           echo "${{ env.kernelsu_id }}" > kernelsu_id.txt
           echo "${{ env.kernelsu_version }}" > kernelsu_version.txt
-          # 打包，排除 .git 减小体积，并将输出文件放在父目录避免自包含错误
+          # 打包到父目录避免自包含
           tar -czf "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" --exclude='.git' .
-          # 移回当前目录以便上传
           mv "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" .
 
       - name: Upload KernelSU Patch Artifact
@@ -116,7 +115,6 @@ jobs:
         run: |
           cd "${{ env.CheckOut_DIR }}/KernelSU"
           tar -xzf KernelSU_*_Patched_*.tar.gz
-          # 从文件读取版本信息
           echo "kernelsu_id=$(cat kernelsu_id.txt)" >> $GITHUB_ENV
           echo "kernelsu_version=$(cat kernelsu_version.txt)" >> $GITHUB_ENV
           rm KernelSU_*_Patched_*.tar.gz kernelsu_id.txt kernelsu_version.txt
@@ -132,15 +130,28 @@ jobs:
           tar -xzf /tmp/clang.tar.gz -C ~/clang
           rm /tmp/clang.tar.gz
 
+          # 显示 clang 目录结构以确认 bin 路径
+          ls -la ~/clang
+          ls -la ~/clang/bin || true
+
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/aarch64-linux-android-4.9
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/arm-linux-androideabi-4.9
-
           git clone https://github.com/SoDebug/AnyKernel.git "${{ env.AnyKernel }}"
 
       - name: Compile Kernel
         if: ${{ env.test_patch != 'true' }}
         run: |
-          CLANG=~/clang/clang-r547379/bin
+          # 根据解压后的实际目录设置 CLANG 路径
+          # 如果 bin 直接在 ~/clang 下，则 CLANG=~/clang/bin
+          # 否则按常规 clang-r547379 目录
+          if [ -d ~/clang/clang-r547379/bin ]; then
+            CLANG=~/clang/clang-r547379/bin
+          else
+            CLANG=~/clang/bin
+          fi
+          echo "Using CLANG: $CLANG"
+          ls -la $CLANG
+
           GCC32=~/arm-linux-androideabi-4.9/bin
           GCC64=~/aarch64-linux-android-4.9/bin
 
@@ -150,6 +161,7 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
+          # 强制指定 LLVM 工具
           export LD=ld.lld
           export AR=llvm-ar
           export NM=llvm-nm
@@ -157,6 +169,9 @@ jobs:
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
           export CC="ccache clang"
+
+          # 禁用将某些 C99 特性视为错误的警告
+          export KCFLAGS="-Wno-vla-extension -Wno-error=unused-command-line-argument"
 
           cd "${{ env.CheckOut_DIR }}"
 

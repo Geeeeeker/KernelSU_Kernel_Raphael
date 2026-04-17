@@ -265,8 +265,12 @@ jobs:
           if [ -f net/netfilter/xt_qtaguid.c ]; then
               patch -p0 < utils/xt_qtaguid.patch
           fi
-
-      - name: Compile Kernel
+     - name: Fix btrfs timespec type error
+        run: |
+          cd "${{ env.CheckOut_DIR }}"
+          sed -i 's/struct timespec now = current_time(&parent_inode->vfs_inode);/struct timespec64 now = current_time(\&parent_inode->vfs_inode);/' fs/btrfs/inode.c
+          
+          - name: Compile Kernel
         if: ${{ env.test_patch != 'true' }}
         run: |
           if [ -d ~/clang/clang-r547379/bin ]; then

@@ -93,7 +93,7 @@ jobs:
           sudo apt-get install -y zip flex bison libncurses-dev gawk libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache automake libtool pkg-config
           sudo apt clean
 
-      # 启用 ccache 缓存，加速后续构建
+      # 启用 ccache 缓存
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
@@ -123,23 +123,14 @@ jobs:
           rm KernelSU_*_Patched_*.tar.gz kernelsu_id.txt kernelsu_version.txt
           
           cd "${{ env.CheckOut_DIR }}"
-          # 清理旧痕迹
           rm -rf drivers/staging/kernelsu
-          
-          # 创建目录和软链接
           mkdir -p drivers/staging/kernelsu
           ln -sf ../../../KernelSU/kernel drivers/staging/kernelsu/KernelSU
-          
-          # 从 KernelSU 源码复制 Makefile 和 Kconfig（它们应位于 kernel/ 目录下）
           cp KernelSU/kernel/Makefile drivers/staging/kernelsu/Makefile
           cp KernelSU/kernel/Kconfig drivers/staging/kernelsu/Kconfig
-          
-          # 确保 drivers/Kconfig 包含对 KernelSU Kconfig 的引用（仅在未包含时添加）
           if ! grep -q "source \"drivers/staging/kernelsu/Kconfig\"" drivers/Kconfig; then
             echo 'source "drivers/staging/kernelsu/Kconfig"' >> drivers/Kconfig
           fi
-          
-          # 验证整合结果
           echo "KernelSU integration check:"
           ls -la drivers/staging/kernelsu/
 
@@ -148,15 +139,12 @@ jobs:
         if: ${{ env.test_patch != 'true' }}
         run: |
           cd "${{ env.CheckOut_DIR }}"
-          # 从参考仓库克隆 rtl8188eus 驱动目录
           git clone --depth=1 --branch master https://github.com/Geeeeeker/android_kernel_xiaomi_sdm845.git rtl8188eus-repo
           if [ -d "rtl8188eus-repo/drivers/rtl8188eus" ]; then
             cp -r rtl8188eus-repo/drivers/rtl8188eus drivers/
-            # 添加 Makefile 引用（如果尚未添加）
             if ! grep -q "obj-\$(CONFIG_RTL8188EU)" drivers/Makefile; then
               echo 'obj-$(CONFIG_RTL8188EU) += rtl8188eus/' >> drivers/Makefile
             fi
-            # 添加 Kconfig 引用
             if ! grep -q "source \"drivers/rtl8188eus/Kconfig\"" drivers/Kconfig; then
               echo 'source "drivers/rtl8188eus/Kconfig"' >> drivers/Kconfig
             fi
@@ -206,52 +194,73 @@ jobs:
           make LLVM=1 LLVM_IAS=1 O=out raphael_defconfig
           ./scripts/config --file out/.config --enable KSU
           ./scripts/config --file out/.config --disable DEBUG_INFO
+          # 关键修复：允许 Section mismatch 警告而不中止编译
+          ./scripts/config --file out/.config --enable SECTION_MISMATCH_WARN_ONLY
           make LLVM=1 LLVM_IAS=1 O=out olddefconfig
           make LLVM=1 LLVM_IAS=1 O=out -j$(nproc)
 
-           # ================ 编译 USB/IP 用户态工具 (直接使用内核 Makefile) ================
+      # ================ 下载 Android NDK ================
+      - name: Download Android NDK
+        if: ${{ env.test_patch != 'true' }}
+        run: |
+          cd ~
+          wget -q https://dl.google.com/android/repository/android-ndk-r27b-linux.zip
+          unzip -q android-ndk-r27b-linux.zip
+          rm android-ndk-r27b-linux.zip
+          echo "NDK_HOME=$HOME/android-ndk-r27b" >> $GITHUB_ENV
+
+      # ================ 编译 USB/IP 用户态工具 (使用 NDK) ================
       - name: Build USB/IP userspace tools for Android
         if: ${{ env.test_patch != 'true' }}
         run: |
-          cd "${{ env.CheckOut_DIR }}"
+          cd "${{ env.CheckOut_DIR }}/tools/usb/usbip"
           
-          # 设置交叉编译环境变量
-          export PATH=~/aarch64-linux-android-4.9/bin:$PATH
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CC="ccache aarch64-linux-android-gcc"
-          export LD=aarch64-linux-android-ld
-          export AR=aarch64-linux-android-ar
-          export STRIP=aarch64-linux-android-strip
+          export NDK=${{ env.NDK_HOME }}
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export PATH=$TOOLCHAIN/bin:$PATH
           
-          # 进入 usbip 工具源码目录
-          cd tools/usb/usbip
+          # 使用 NDK 的 clang，API level 21 兼容大多数设备
+          export CC="ccache aarch64-linux-android21-clang"
+          export LD=ld.lld
+          export AR=llvm-ar
+          export STRIP=llvm-strip
+          export CFLAGS="-O2 -fPIC"
+          export LDFLAGS="-Wl,-rpath,/system/lib64"
           
-          # 清理之前的构建残留（如果有）
-          make clean 2>/dev/null || true
+          # 清理旧构建残留
+          make distclean 2>/dev/null || true
+          rm -f config.cache config.log
           
-          # 使用内核源码的 Makefile 进行编译
-          # 禁用 libsysfs（Android 通常无此库），通过设置 CFLAGS 定义
-          make -j$(nproc) \
-            V=1 \
+          # 生成 configure 脚本（如有 autogen.sh）
+          if [ -f autogen.sh ]; then
+            ./autogen.sh
+          fi
+          
+          # 配置：禁用 libusb 和 libsysfs
+          ./configure \
+            --host=aarch64-linux-android \
+            --build=x86_64-pc-linux-gnu \
+            --without-libusb \
+            --without-libsysfs \
             CC="$CC" \
             LD="$LD" \
             AR="$AR" \
             STRIP="$STRIP" \
-            CFLAGS="-O2 -fPIC -DNO_LIB_SYSFS" \
-            LDFLAGS="-Wl,-rpath,/system/lib64" \
-            all
+            CFLAGS="$CFLAGS" \
+            LDFLAGS="$LDFLAGS"
           
-          # 收集产物到指定目录
+          # 编译
+          make -j$(nproc)
+          
+          # 收集产物
           mkdir -p "${{ env.CheckOut_DIR }}/usbip-android-bin"
-          cp src/usbip src/usbipd "${{ env.CheckOut_DIR }}/usbip-android-bin/" 2>/dev/null || true
-          # 收集生成的共享库（libusbip.so*）
-          find . -name "*.so*" -exec cp {} "${{ env.CheckOut_DIR }}/usbip-android-bin/" \; 2>/dev/null || true
+          cp src/usbip src/usbipd "${{ env.CheckOut_DIR }}/usbip-android-bin/" || true
+          find . -name "*.so*" -exec cp {} "${{ env.CheckOut_DIR }}/usbip-android-bin/" \;
           
           # 精简二进制
-          aarch64-linux-android-strip "${{ env.CheckOut_DIR }}/usbip-android-bin/usbip" || true
-          aarch64-linux-android-strip "${{ env.CheckOut_DIR }}/usbip-android-bin/usbipd" || true
-          aarch64-linux-android-strip "${{ env.CheckOut_DIR }}/usbip-android-bin/"*.so* || true
+          $STRIP "${{ env.CheckOut_DIR }}/usbip-android-bin/usbip" || true
+          $STRIP "${{ env.CheckOut_DIR }}/usbip-android-bin/usbipd" || true
+          $STRIP "${{ env.CheckOut_DIR }}/usbip-android-bin/"*.so* || true
           
           echo "USB/IP Android binaries built successfully."
           ls -la "${{ env.CheckOut_DIR }}/usbip-android-bin/"

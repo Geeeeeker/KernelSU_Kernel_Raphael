@@ -244,6 +244,8 @@ jobs:
           # 模块版本
           echo "CONFIG_MODVERSIONS=n" >> $DEFCONFIG
           echo "CONFIG_ZRAM=y" >> $DEFCONFIG
+          echo "CONFIG_ZRAM_DEF_COMP_ZSTD=y" >> $DEFCONFIG
+          echo "CONFIG_CRYPTO_ZSTD=y" >> $DEFCONFIG
           
           # RTL8188EU
           echo "CONFIG_RTL8188EU=m" >> $DEFCONFIG
@@ -262,14 +264,6 @@ jobs:
           echo "CONFIG_ANDROID_BINDER_IPC=y" >> $DEFCONFIG
           echo "CONFIG_ANDROID_BINDER_DEVICES=\"binder,hwbinder,vndbinder\"" >> $DEFCONFIG
           
-          # 禁用 BTRFS/ZSTD
-          sed -i '/CONFIG_BTRFS_FS/d' $DEFCONFIG
-          sed -i '/CONFIG_ZSTD/d' $DEFCONFIG
-          sed -i '/CONFIG_CRYPTO_ZSTD/d' $DEFCONFIG
-          echo "# CONFIG_BTRFS_FS is not set" >> $DEFCONFIG
-          echo "# CONFIG_BTRFS_FS_ZSTD is not set" >> $DEFCONFIG
-          echo "# CONFIG_ZSTD_COMPRESS is not set" >> $DEFCONFIG
-          echo "# CONFIG_ZSTD_DECOMPRESS is not set" >> $DEFCONFIG
           
           # 添加 Docker 支持配置
           rm -rf utils
@@ -293,40 +287,6 @@ jobs:
           sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
           sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
           
-          # 应用源码修复（针对老内核）
-          echo "Applying source fixes for old kernel..."
-          if ! grep -q "typedef.*vm_fault_t" include/linux/mm_types.h; then
-              sed -i '/#include <linux\/mm_types_task.h>/i typedef int vm_fault_t;' include/linux/mm_types.h
-          fi
-          awk '
-          BEGIN { count=0; skip=0 }
-          /^static inline void \*kvcalloc/ {
-              count++
-              if (count == 2) skip=1
-          }
-          skip && /^}/ {
-              skip=0
-              next
-          }
-          !skip
-          ' include/linux/mm.h > mm.h.tmp && mv mm.h.tmp include/linux/mm.h
-          
-          chmod +x utils/runcpatch.sh
-          if [ -f kernel/cgroup/cgroup.c ]; then
-              sh utils/runcpatch.sh kernel/cgroup/cgroup.c
-          fi
-          if [ -f kernel/cgroup.c ]; then
-              sh utils/runcpatch.sh kernel/cgroup.c
-          fi
-          if [ -f net/netfilter/xt_qtaguid.c ]; then
-              patch -p0 < utils/xt_qtaguid.patch || true
-          fi
-          
-          CFQ_FILE="block/cfq-iosched.c"
-          if [ -f "$CFQ_FILE" ]; then
-              sed -i '/^#define cfq_log_cfqq/,/while (0)/ { /break;/d; }' "$CFQ_FILE"
-              echo "Fixed cfq_log_cfqq macro in $CFQ_FILE"
-          fi
 
       - name: Compile Kernel (with full configuration)
         if: ${{ env.test_patch != 'true' }}

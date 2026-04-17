@@ -18,6 +18,7 @@ jobs:
         run: |
           mkdir -p "$KernelSU_Dir"
           git clone https://github.com/SoDebug/KernelSU.git "$KernelSU_Dir"
+
       - name: Get KernelSU version and id
         run: |
           cd "$KernelSU_Dir"
@@ -25,14 +26,17 @@ jobs:
           git_count=$(git rev-list --count HEAD)
           kernelsu_version=$(expr 10000 + $git_count + 200)
           echo "kernelsu_version=$kernelsu_version" >> $GITHUB_ENV
+
       - name: Download Patch from 'SoDebug/KernelSU' (setup branch)
         run: |
           mkdir -p "$Setup_Dir"
           git clone -b setup https://github.com/SoDebug/KernelSU.git "$Setup_Dir"
+
       - name: Get Patch commit id
         run: |
           cd "$Setup_Dir"
           echo "patch_id=$(git show -s --format='%h')" >> $GITHUB_ENV
+
       - name: Prepare KernelSU patch archive
         run: |
           cp "$Setup_Dir/setup.sh" "$KernelSU_Dir/kernel/setup.sh"
@@ -41,6 +45,7 @@ jobs:
           echo "${{ env.kernelsu_version }}" > kernelsu_version.txt
           tar -czf "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" --exclude='.git' .
           mv "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" .
+
       - name: Upload KernelSU Patch Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -90,7 +95,7 @@ jobs:
         if: ${{ env.test_patch != 'true' }}
         run: |
           sudo apt update -y
-          sudo apt-get install -y zip flex bison libncurses-dev gawk libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache automake libtool pkg-config
+          sudo apt-get install -y zip flex bison libncurses-dev gawk libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache automake libtool pkg-config libudev-dev
           sudo apt clean
 
       # 启用 ccache 缓存
@@ -236,12 +241,14 @@ jobs:
             ./autogen.sh
           fi
           
-          # 配置：禁用 libusb 和 libsysfs
+          # 配置：禁用 libusb 和 libsysfs，并绕过 libudev 检查
+          # 添加 ac_cv_header_libudev_h=no 来告诉 configure 我们不依赖 libudev
           ./configure \
             --host=aarch64-linux-android \
             --build=x86_64-pc-linux-gnu \
             --without-libusb \
             --without-libsysfs \
+            ac_cv_header_libudev_h=no \
             CC="$CC" \
             LD="$LD" \
             AR="$AR" \
@@ -314,6 +321,7 @@ jobs:
           Tested: undefined
           Build Date: $(date +'%Y/%m/%d')
           EOF
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:

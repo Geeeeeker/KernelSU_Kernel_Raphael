@@ -18,7 +18,6 @@ jobs:
         run: |
           mkdir -p "$KernelSU_Dir"
           git clone https://github.com/SoDebug/KernelSU.git "$KernelSU_Dir"
-
       - name: Get KernelSU version and id
         run: |
           cd "$KernelSU_Dir"
@@ -26,17 +25,14 @@ jobs:
           git_count=$(git rev-list --count HEAD)
           kernelsu_version=$(expr 10000 + $git_count + 200)
           echo "kernelsu_version=$kernelsu_version" >> $GITHUB_ENV
-
       - name: Download Patch from 'SoDebug/KernelSU' (setup branch)
         run: |
           mkdir -p "$Setup_Dir"
           git clone -b setup https://github.com/SoDebug/KernelSU.git "$Setup_Dir"
-
       - name: Get Patch commit id
         run: |
           cd "$Setup_Dir"
           echo "patch_id=$(git show -s --format='%h')" >> $GITHUB_ENV
-
       - name: Prepare KernelSU patch archive
         run: |
           cp "$Setup_Dir/setup.sh" "$KernelSU_Dir/kernel/setup.sh"
@@ -45,7 +41,6 @@ jobs:
           echo "${{ env.kernelsu_version }}" > kernelsu_version.txt
           tar -czf "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" --exclude='.git' .
           mv "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" .
-
       - name: Upload KernelSU Patch Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -96,12 +91,15 @@ jobs:
         run: |
           sudo apt update -y
           sudo apt-get install -y zip flex bison libncurses-dev gawk libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache
+          # USB/IP 用户态工具可能依赖 libsysfs，但 Android 环境下通常不需要，我们强制禁用
+          # 安装一些构建工具
+          sudo apt-get install -y automake libtool pkg-config
           sudo apt clean
 
       - name: Clone Kernel Source (Android 16.0)
         if: ${{ env.test_patch != 'true' }}
         run: |
-          git clone -b 16.0 https://github.com/Geeeeeker/kernel_xiaomi_raphael-pixel.git "$CheckOut_DIR"
+          git clone -b 16.0-susfs https://github.com/Geeeeeker/kernel_xiaomi_raphael-pixel.git "$CheckOut_DIR"
 
       - name: Download KernelSU_Patched Artifact
         uses: actions/download-artifact@v4
@@ -138,6 +136,30 @@ jobs:
           echo "KernelSU integration check:"
           ls -la drivers/staging/kernelsu/
 
+      # ================ 添加 rtl8188eus 驱动源码 ================
+      - name: Integrate rtl8188eus WiFi driver source
+        if: ${{ env.test_patch != 'true' }}
+        run: |
+          cd "${{ env.CheckOut_DIR }}"
+          # 从参考仓库克隆 rtl8188eus 驱动目录
+          git clone --depth=1 --branch master https://github.com/Geeeeeker/android_kernel_xiaomi_sdm845.git rtl8188eus-repo
+          if [ -d "rtl8188eus-repo/drivers/rtl8188eus" ]; then
+            cp -r rtl8188eus-repo/drivers/rtl8188eus drivers/
+            # 添加 Makefile 引用（如果尚未添加）
+            if ! grep -q "obj-\$(CONFIG_RTL8188EU)" drivers/Makefile; then
+              echo 'obj-$(CONFIG_RTL8188EU) += rtl8188eus/' >> drivers/Makefile
+            fi
+            # 添加 Kconfig 引用
+            if ! grep -q "source \"drivers/rtl8188eus/Kconfig\"" drivers/Kconfig; then
+              echo 'source "drivers/rtl8188eus/Kconfig"' >> drivers/Kconfig
+            fi
+          else
+            echo "Error: rtl8188eus directory not found in cloned repo"
+            exit 1
+          fi
+          rm -rf rtl8188eus-repo
+          echo "rtl8188eus driver source integrated."
+
       - name: Prepare Toolchains
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -145,10 +167,8 @@ jobs:
           wget -q https://github.com/Geeeeeker/boot/releases/download/clang-prebuilts-20260319-031015/clang-r547379.tar.gz -O /tmp/clang.tar.gz
           tar -xzf /tmp/clang.tar.gz -C ~/clang
           rm /tmp/clang.tar.gz
-
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/aarch64-linux-android-4.9
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/arm-linux-androideabi-4.9
-
           git clone https://github.com/SoDebug/AnyKernel.git "${{ env.AnyKernel }}"
 
       - name: Compile Kernel
@@ -160,16 +180,13 @@ jobs:
             CLANG=~/clang/bin
           fi
           echo "Using CLANG: $CLANG"
-
           GCC32=~/arm-linux-androideabi-4.9/bin
           GCC64=~/aarch64-linux-android-4.9/bin
-
           export PATH="$CLANG:$GCC64:$GCC32:$PATH"
           export ARCH=arm64
           export CLANG_TRIPLE=aarch64-linux-gnu
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-
           export LD=ld.lld
           export AR=llvm-ar
           export NM=llvm-nm
@@ -177,16 +194,72 @@ jobs:
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
           export CC="ccache clang"
-
           export KCFLAGS="-Wno-vla-extension -Wno-error=unused-command-line-argument"
-
           cd "${{ env.CheckOut_DIR }}"
-
           make LLVM=1 LLVM_IAS=1 O=out raphael_defconfig
           ./scripts/config --file out/.config --enable KSU
           ./scripts/config --file out/.config --disable DEBUG_INFO
           make LLVM=1 LLVM_IAS=1 O=out olddefconfig
           make LLVM=1 LLVM_IAS=1 O=out -j$(nproc)
+
+      # ================ 编译 USB/IP 用户态工具 (Android 版本) ================
+      - name: Build USB/IP userspace tools for Android
+        if: ${{ env.test_patch != 'true' }}
+        run: |
+          cd "${{ env.CheckOut_DIR }}"
+          
+          # 设置交叉编译环境变量
+          export PATH=~/aarch64-linux-android-4.9/bin:$PATH
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CC=aarch64-linux-android-gcc
+          export LD=aarch64-linux-android-ld
+          export AR=aarch64-linux-android-ar
+          export STRIP=aarch64-linux-android-strip
+          
+          # 进入 usbip 源码目录
+          cd tools/usb/usbip
+          
+          # 清理可能存在的旧构建文件
+          make clean || true
+          
+          # 配置 autoreconf（如果需要）
+          ./autogen.sh || true
+          
+          # 针对 Android 环境进行配置：
+          # - 禁用 libsysfs（Android 通常无此库）
+          # - 使用交叉编译器
+          # - 指定主机类型为 aarch64-linux-android
+          # - 静态链接以避免运行时库依赖问题（可选，推荐静态链接）
+          ./configure \
+            --host=aarch64-linux-android \
+            --build=x86_64-pc-linux-gnu \
+            --without-libusb \
+            --without-libsysfs \
+            --disable-shared \
+            --enable-static \
+            CC=$CC \
+            LD=$LD \
+            AR=$AR \
+            STRIP=$STRIP \
+            CFLAGS="-static -O2 -fPIE" \
+            LDFLAGS="-static -pie"
+          
+          # 编译
+          make -j$(nproc)
+          
+          # 收集产物到指定目录
+          mkdir -p "${{ env.CheckOut_DIR }}/usbip-android-bin"
+          cp src/usbip src/usbipd "${{ env.CheckOut_DIR }}/usbip-android-bin/"
+          # 如果也生成了动态库（尽管我们禁用了 shared，但以防万一）
+          find . -name "*.so*" -exec cp {} "${{ env.CheckOut_DIR }}/usbip-android-bin/" \; 2>/dev/null || true
+          
+          # 使用 Android strip 精简二进制
+          aarch64-linux-android-strip "${{ env.CheckOut_DIR }}/usbip-android-bin/usbip" || true
+          aarch64-linux-android-strip "${{ env.CheckOut_DIR }}/usbip-android-bin/usbipd" || true
+          
+          echo "USB/IP Android binaries built successfully."
+          ls -la "${{ env.CheckOut_DIR }}/usbip-android-bin/"
 
       - name: Package Kernel
         if: ${{ env.test_patch != 'true' }}
@@ -195,13 +268,21 @@ jobs:
           cp -v ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/dtbo.img "${{ env.AnyKernel }}"/o
           cd "${{ env.AnyKernel }}"
           7z a -mx9 "Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_16.zip" *
-
+      
       - name: Upload Kernel Package
         if: ${{ env.test_patch != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: Raphael-Kernel_KSU_Dev_SOVIET-ANDROID_16
           path: ${{ env.AnyKernel }}/Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_16.zip
+
+      - name: Upload USB/IP Android Binaries
+        if: ${{ env.test_patch != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: USBIP_Android_Binaries
+          path: ${{ env.CheckOut_DIR }}/usbip-android-bin/*
+          retention-days: 30
 
   Release:
     needs:
@@ -229,7 +310,6 @@ jobs:
           Tested: undefined
           Build Date: $(date +'%Y/%m/%d')
           EOF
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -247,3 +327,4 @@ jobs:
             ${{ env.Release_DIR }}/KernelSU_Patched/*.tar.gz
             ${{ env.Release_DIR }}/KernelSU_Manager/*.apk
             ${{ env.Release_DIR }}/Raphael-Kernel_KSU_Dev_SOVIET-ANDROID_16/*.zip
+            ${{ env.Release_DIR }}/USBIP_Android_Binaries/*

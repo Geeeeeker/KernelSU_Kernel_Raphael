@@ -18,7 +18,6 @@ jobs:
         run: |
           mkdir -p "$KernelSU_Dir"
           git clone https://github.com/SoDebug/KernelSU.git "$KernelSU_Dir"
-
       - name: Get KernelSU version and id
         run: |
           cd "$KernelSU_Dir"
@@ -26,17 +25,14 @@ jobs:
           git_count=$(git rev-list --count HEAD)
           kernelsu_version=$(expr 10000 + $git_count + 200)
           echo "kernelsu_version=$kernelsu_version" >> $GITHUB_ENV
-
       - name: Download Patch from 'SoDebug/KernelSU' (setup branch)
         run: |
           mkdir -p "$Setup_Dir"
           git clone -b setup https://github.com/SoDebug/KernelSU.git "$Setup_Dir"
-
       - name: Get Patch commit id
         run: |
           cd "$Setup_Dir"
           echo "patch_id=$(git show -s --format='%h')" >> $GITHUB_ENV
-
       - name: Prepare KernelSU patch archive
         run: |
           cp "$Setup_Dir/setup.sh" "$KernelSU_Dir/kernel/setup.sh"
@@ -45,7 +41,6 @@ jobs:
           echo "${{ env.kernelsu_version }}" > kernelsu_version.txt
           tar -czf "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" --exclude='.git' .
           mv "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" .
-
       - name: Upload KernelSU Patch Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -97,7 +92,6 @@ jobs:
           sudo apt update -y
           sudo apt-get install -y zip flex bison libncurses-dev gawk libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache automake libtool pkg-config libudev-dev
           sudo apt clean
-
       # 启用 ccache 缓存
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -112,7 +106,6 @@ jobs:
         if: ${{ env.test_patch != 'true' }}
         run: |
           git clone -b 16.0 https://github.com/Geeeeeker/kernel_xiaomi_raphael-pixel.git "$CheckOut_DIR"
-
       - name: Download KernelSU_Patched Artifact
         uses: actions/download-artifact@v4
         with:
@@ -138,7 +131,6 @@ jobs:
           fi
           echo "KernelSU integration check:"
           ls -la drivers/staging/kernelsu/
-
       # ================ 添加 rtl8188eus 驱动源码 ================
       - name: Integrate rtl8188eus WiFi driver source
         if: ${{ env.test_patch != 'true' }}
@@ -159,7 +151,6 @@ jobs:
           fi
           rm -rf rtl8188eus-repo
           echo "rtl8188eus driver source integrated."
-
       - name: Prepare Toolchains
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -170,7 +161,6 @@ jobs:
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/aarch64-linux-android-4.9
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/arm-linux-androideabi-4.9
           git clone https://github.com/SoDebug/AnyKernel.git "${{ env.AnyKernel }}"
-
       - name: Compile Kernel
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -203,7 +193,72 @@ jobs:
           ./scripts/config --file out/.config --enable SECTION_MISMATCH_WARN_ONLY
           make LLVM=1 LLVM_IAS=1 O=out olddefconfig
           make LLVM=1 LLVM_IAS=1 O=out -j$(nproc)
-
+      # ================ 下载 Android NDK ================
+      - name: Download Android NDK
+        if: ${{ env.test_patch != 'true' }}
+        run: |
+          cd ~
+          wget -q https://dl.google.com/android/repository/android-ndk-r27b-linux.zip
+          unzip -q android-ndk-r27b-linux.zip
+          rm android-ndk-r27b-linux.zip
+          echo "NDK_HOME=$HOME/android-ndk-r27b" >> $GITHUB_ENV
+      # ================ 编译 USB/IP 用户态工具 (使用 NDK) ================
+      - name: Build USB/IP userspace tools for Android
+        if: ${{ env.test_patch != 'true' }}
+        run: |
+          cd "${{ env.CheckOut_DIR }}/tools/usb/usbip"
+          
+          export NDK=${{ env.NDK_HOME }}
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export PATH=$TOOLCHAIN/bin:$PATH
+          
+          # 使用 NDK 的 clang，API level 21 兼容大多数设备
+          export CC="ccache aarch64-linux-android21-clang"
+          export LD=ld.lld
+          export AR=llvm-ar
+          export STRIP=llvm-strip
+          export CFLAGS="-O2 -fPIC"
+          export LDFLAGS="-Wl,-rpath,/system/lib64"
+          
+          # 清理旧构建残留
+          make distclean 2>/dev/null || true
+          rm -f config.cache config.log
+          
+          # 生成 configure 脚本（如有 autogen.sh）
+          if [ -f autogen.sh ]; then
+            ./autogen.sh
+          fi
+          
+          # 配置：禁用 libusb 和 libsysfs，并绕过 libudev 检查
+          # 添加 ac_cv_header_libudev_h=no 来告诉 configure 我们不依赖 libudev
+          ./configure \
+            --host=aarch64-linux-android \
+            --build=x86_64-pc-linux-gnu \
+            --without-libusb \
+            --without-libsysfs \
+            --without-libudev \
+            CC="$CC" \
+            LD="$LD" \
+            AR="$AR" \
+            STRIP="$STRIP" \
+            CFLAGS="$CFLAGS" \
+            LDFLAGS="$LDFLAGS"
+          
+          # 编译
+          make -j$(nproc)
+          
+          # 收集产物
+          mkdir -p "${{ env.CheckOut_DIR }}/usbip-android-bin"
+          cp src/usbip src/usbipd "${{ env.CheckOut_DIR }}/usbip-android-bin/" || true
+          find . -name "*.so*" -exec cp {} "${{ env.CheckOut_DIR }}/usbip-android-bin/" \;
+          
+          # 精简二进制
+          $STRIP "${{ env.CheckOut_DIR }}/usbip-android-bin/usbip" || true
+          $STRIP "${{ env.CheckOut_DIR }}/usbip-android-bin/usbipd" || true
+          $STRIP "${{ env.CheckOut_DIR }}/usbip-android-bin/"*.so* || true
+          
+          echo "USB/IP Android binaries built successfully."
+          ls -la "${{ env.CheckOut_DIR }}/usbip-android-bin/"
       - name: Package Kernel
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -218,3 +273,56 @@ jobs:
         with:
           name: Raphael-Kernel_KSU_Dev_SOVIET-ANDROID_16
           path: ${{ env.AnyKernel }}/Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_16.zip
+
+      - name: Upload USB/IP Android Binaries
+        if: ${{ env.test_patch != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: USBIP_Android_Binaries
+          path: ${{ env.CheckOut_DIR }}/usbip-android-bin/*
+          retention-days: 30
+
+  Release:
+    needs:
+      - Compile_SOVIET_ANDROID
+      - Collect_Config_Release
+    runs-on: ubuntu-latest
+    env:
+      Release_DIR: /home/runner/work/release
+    steps:
+      - name: Set current time
+        run: echo "time=$(date +'%Y-%m-%d_%H-%M-%S')" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release tag and notes
+        run: |
+          echo "release_tag=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+          cat > release.txt <<EOF
+          SoDebug Kernel Config：
+          Device Code: raphael
+          Device Name：Redmi K20 Pro | Mi 9T Pro
+          Support Android：16.0
+          KernelSU Git Version：***
+          KernelSU Version: *****
+          Patch ID: *******
+          KernelSU ID: *******
+          Tested: undefined
+          Build Date: $(date +'%Y/%m/%d')
+          EOF
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ env.Release_DIR }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v.${{ steps.tag.outputs.release_tag }}
+          name: ${{ steps.tag.outputs.release_tag }} Kernel for Raphael
+          body_path: release.txt
+          files: |
+            ${{ env.Release_DIR }}/KernelSU_Patched/*.tar.gz
+            ${{ env.Release_DIR }}/KernelSU_Manager/*.apk
+            ${{ env.Release_DIR }}/Raphael-Kernel_KSU_Dev_SOVIET-ANDROID_16/*.zip
+            ${{ env.Release_DIR }}/USBIP_Android_Binaries/*

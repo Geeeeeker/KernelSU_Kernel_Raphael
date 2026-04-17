@@ -117,16 +117,22 @@ jobs:
           echo "kernelsu_version=$(cat kernelsu_version.txt)" >> $GITHUB_ENV
           rm KernelSU_*_Patched_*.tar.gz kernelsu_id.txt kernelsu_version.txt
           cd "${{ env.CheckOut_DIR }}"
-          # 清理旧目录并执行官方整合脚本
+          # 清理旧目录并尝试执行官方脚本
           rm -rf drivers/staging/kernelsu
-          sh KernelSU/kernel/setup.sh
-          # 若 setup.sh 未正确生成 Makefile，手动补救
+          sh KernelSU/kernel/setup.sh || echo "setup.sh may have failed, will manually fix"
+          # 强制创建必需的文件和链接
+          mkdir -p drivers/staging/kernelsu
           if [ ! -f drivers/staging/kernelsu/Makefile ]; then
-            echo "Makefile missing, creating manually"
-            mkdir -p drivers/staging/kernelsu
+            echo "Manually creating KernelSU Makefile and symlink"
             ln -sf ../../../KernelSU/kernel drivers/staging/kernelsu/KernelSU
             cp KernelSU/kernel/Makefile drivers/staging/kernelsu/Makefile
           fi
+          # 确保 Kconfig 被包含（如果内核源码未包含）
+          if ! grep -q "source \"drivers/staging/kernelsu/Kconfig\"" drivers/Kconfig; then
+            echo 'source "drivers/staging/kernelsu/Kconfig"' >> drivers/Kconfig
+          fi
+          # 验证整合结果
+          ls -la drivers/staging/kernelsu/
 
       - name: Prepare Toolchains
         if: ${{ env.test_patch != 'true' }}
@@ -144,7 +150,6 @@ jobs:
       - name: Compile Kernel
         if: ${{ env.test_patch != 'true' }}
         run: |
-          # 自适应 Clang 路径
           if [ -d ~/clang/clang-r547379/bin ]; then
             CLANG=~/clang/clang-r547379/bin
           else
@@ -169,16 +174,18 @@ jobs:
           export STRIP=llvm-strip
           export CC="ccache clang"
 
-          # 忽略部分警告错误
           export KCFLAGS="-Wno-vla-extension -Wno-error=unused-command-line-argument"
 
           cd "${{ env.CheckOut_DIR }}"
 
           make LLVM=1 LLVM_IAS=1 O=out raphael_defconfig
-          # 确保 KernelSU 相关配置被启用（可选）
-          ./scripts/config --file out/.config --enable KSU || true
+          # 启用 KernelSU 配置
+          ./scripts/config --file out/.config --enable KSU
+          # 关闭可能引起编译错误的调试选项（可选）
+          ./scripts/config --file out/.config --disable DEBUG_INFO
           make LLVM=1 LLVM_IAS=1 O=out olddefconfig
-          make LLVM=1 LLVM_IAS=1 O=out -j$(nproc)
+          # 开始编译，输出详细错误
+          make LLVM=1 LLVM_IAS=1 O=out -j$(nproc) V=1
 
       - name: Package Kernel
         if: ${{ env.test_patch != 'true' }}

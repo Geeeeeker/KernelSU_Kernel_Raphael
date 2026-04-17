@@ -1,4 +1,4 @@
-name: Kernel CI (USB/IP + CH340 + RTL8188 + KernelSU Next)
+name: Kernel CI (USB/IP + CH340 + RTL8188 + KernelSU Next APK)
 
 on:
   repository_dispatch:
@@ -11,16 +11,16 @@ jobs:
   Patch_KernelSU:
     runs-on: ubuntu-latest
     env:
-      KernelSU_Dir: /home/runner/work/KernelSU_Next
+      KernelSU_Dir: /home/runner/work/KernelSU
       Setup_Dir: /home/runner/work/Setup_Dir
       KSU_APK_URL: "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.2.0/KernelSU_Next_v3.2.0_33129-release.apk"
     steps:
-      - name: Download KernelSU_Next source from official repo
+      - name: Download KernelSU from 'SoDebug/KernelSU'
         run: |
           mkdir -p "$KernelSU_Dir"
-          git clone https://github.com/KernelSU-Next/KernelSU-Next.git "$KernelSU_Dir"
+          git clone https://github.com/SoDebug/KernelSU.git "$KernelSU_Dir"
 
-      - name: Get KernelSU_Next version and id
+      - name: Get KernelSU version and id
         run: |
           cd "$KernelSU_Dir"
           echo "kernelsu_id=$(git show -s --format='%h')" >> $GITHUB_ENV
@@ -137,7 +137,7 @@ jobs:
           name: KernelSU_Patched
           path: ${{ env.CheckOut_DIR }}/KernelSU
 
-      - name: Integrate KernelSU into Kernel Source (Official method)
+      - name: Integrate KernelSU into Kernel Source (Verified working method)
         run: |
           cd "${{ env.CheckOut_DIR }}/KernelSU"
           tar -xzf KernelSU_*_Patched_*.tar.gz
@@ -146,35 +146,30 @@ jobs:
           rm KernelSU_*_Patched_*.tar.gz kernelsu_id.txt kernelsu_version.txt
           
           cd "${{ env.CheckOut_DIR }}"
-          
           # 清理旧痕迹
-          rm -rf drivers/kernelsu drivers/staging/kernelsu
+          rm -rf drivers/staging/kernelsu
           
-          # 创建 KernelSU 驱动目录
-          mkdir -p drivers/kernelsu
+          # 创建目录和软链接
+          mkdir -p drivers/staging/kernelsu
+          ln -sf ../../../KernelSU/kernel drivers/staging/kernelsu/KernelSU
           
-          # 软链接 KernelSU 内核源码到 kernel 子目录
-          ln -sf ../../KernelSU/kernel drivers/kernelsu/kernel
+          # 从 KernelSU 源码复制 Makefile 和 Kconfig
+          cp KernelSU/kernel/Makefile drivers/staging/kernelsu/Makefile
+          cp KernelSU/kernel/Kconfig drivers/staging/kernelsu/Kconfig
           
-          # 创建正确的 Makefile（指向 kernel 子目录）
-          echo 'obj-y += kernel/' > drivers/kernelsu/Makefile
-          
-          # 复制 Kconfig 文件
-          cp KernelSU/kernel/Kconfig drivers/kernelsu/Kconfig
-          
-          # 修改 drivers/Kconfig，添加 KernelSU 条目
-          if ! grep -q "source \"drivers/kernelsu/Kconfig\"" drivers/Kconfig; then
-            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+          # 确保 drivers/Kconfig 包含对 KernelSU Kconfig 的引用
+          if ! grep -q "source \"drivers/staging/kernelsu/Kconfig\"" drivers/Kconfig; then
+            echo 'source "drivers/staging/kernelsu/Kconfig"' >> drivers/Kconfig
           fi
           
-          # 修改 drivers/Makefile，添加编译目标
+          # 确保 drivers/Makefile 包含 staging/kernelsu 编译目标
           if ! grep -q "obj-\$(CONFIG_KSU)" drivers/Makefile; then
-            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+            echo 'obj-$(CONFIG_KSU) += staging/kernelsu/' >> drivers/Makefile
           fi
           
           echo "KernelSU integration check:"
-          ls -la drivers/kernelsu/
-          grep "kernelsu" drivers/Makefile
+          ls -la drivers/staging/kernelsu/
+          grep "staging/kernelsu" drivers/Makefile || echo "Makefile entry not found!"
 
       - name: Add rtl8188eus WiFi driver
         if: ${{ env.test_patch != 'true' }}
@@ -502,8 +497,9 @@ jobs:
           Device Code: raphael
           Device Name：Redmi K20 Pro | Mi 9T Pro
           Support Android：16.0
-          KernelSU Next Version：${{ env.kernelsu_version }}
-          KernelSU Next ID：${{ env.kernelsu_id }}
+          KernelSU Version：${{ env.kernelsu_version }}
+          KernelSU ID：${{ env.kernelsu_id }}
+          Manager APK: KernelSU Next v3.2.0
           Features:
           - USB/IP Support (modules + userspace tools)
           - CH340, FTDI, CP210X, PL2303 USB Serial Drivers

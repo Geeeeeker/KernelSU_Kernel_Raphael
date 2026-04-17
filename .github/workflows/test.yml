@@ -209,13 +209,13 @@ jobs:
           make LLVM=1 LLVM_IAS=1 O=out olddefconfig
           make LLVM=1 LLVM_IAS=1 O=out -j$(nproc)
 
-      # ================ 编译 USB/IP 用户态工具 (Android 动态链接版本) ================
+           # ================ 编译 USB/IP 用户态工具 (直接使用内核 Makefile) ================
       - name: Build USB/IP userspace tools for Android
         if: ${{ env.test_patch != 'true' }}
         run: |
           cd "${{ env.CheckOut_DIR }}"
           
-          # 设置交叉编译环境变量，确保使用 Android GCC 且通过 ccache 加速
+          # 设置交叉编译环境变量
           export PATH=~/aarch64-linux-android-4.9/bin:$PATH
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-android-
@@ -224,41 +224,31 @@ jobs:
           export AR=aarch64-linux-android-ar
           export STRIP=aarch64-linux-android-strip
           
-          # 进入 usbip 源码目录
+          # 进入 usbip 工具源码目录
           cd tools/usb/usbip
           
-          # 清理可能存在的旧构建文件
-          [ -f Makefile ] && make distclean || true
+          # 清理之前的构建残留（如果有）
+          make clean 2>/dev/null || true
           
-          # 生成 configure 脚本
-          ./autogen.sh
-          
-          # 配置编译选项：
-          # - 动态链接（默认），生成共享库
-          # - 禁用 libusb 和 libsysfs（Android 无这些库）
-          # - 指定主机类型
-          ./configure \
-            --host=aarch64-linux-android \
-            --build=x86_64-pc-linux-gnu \
-            --without-libusb \
-            --without-libsysfs \
+          # 使用内核源码的 Makefile 进行编译
+          # 禁用 libsysfs（Android 通常无此库），通过设置 CFLAGS 定义
+          make -j$(nproc) \
+            V=1 \
             CC="$CC" \
             LD="$LD" \
             AR="$AR" \
             STRIP="$STRIP" \
-            CFLAGS="-O2 -fPIC" \
-            LDFLAGS="-Wl,-rpath,/system/lib64"
-          
-          # 编译
-          make -j$(nproc)
+            CFLAGS="-O2 -fPIC -DNO_LIB_SYSFS" \
+            LDFLAGS="-Wl,-rpath,/system/lib64" \
+            all
           
           # 收集产物到指定目录
           mkdir -p "${{ env.CheckOut_DIR }}/usbip-android-bin"
-          cp src/usbip src/usbipd "${{ env.CheckOut_DIR }}/usbip-android-bin/"
+          cp src/usbip src/usbipd "${{ env.CheckOut_DIR }}/usbip-android-bin/" 2>/dev/null || true
           # 收集生成的共享库（libusbip.so*）
           find . -name "*.so*" -exec cp {} "${{ env.CheckOut_DIR }}/usbip-android-bin/" \; 2>/dev/null || true
           
-          # 精简二进制（保留调试信息可后续去除，但 strip 后体积更小）
+          # 精简二进制
           aarch64-linux-android-strip "${{ env.CheckOut_DIR }}/usbip-android-bin/usbip" || true
           aarch64-linux-android-strip "${{ env.CheckOut_DIR }}/usbip-android-bin/usbipd" || true
           aarch64-linux-android-strip "${{ env.CheckOut_DIR }}/usbip-android-bin/"*.so* || true

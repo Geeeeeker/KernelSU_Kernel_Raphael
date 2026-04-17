@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
   push:
     branches:
-    - "main"
-    
+      - "main"
+
 jobs:
   Patch_KernelSU:
     runs-on: ubuntu-latest
@@ -18,107 +18,122 @@ jobs:
         run: |
           mkdir $KernelSU_Dir
           git clone https://github.com/SoDebug/KernelSU.git $KernelSU_Dir
-          
+
       - name: Get KernelSU id
         id: get-kernelsu-id
         run: |
           cd $KernelSU_Dir
           echo "kernelsu_id=$(git show -s --date=short --format="%h")" >> $GITHUB_ENV
-          
+
       - name: Download Patch form 'SoDebug/KernelSU'
         id: get-patch
         run: |
-          mkdir $Setup_Dir 
+          mkdir $Setup_Dir
           git clone -b setup https://github.com/SoDebug/KernelSU.git $Setup_Dir
-          
+
       - name: Get Patch id
         id: get-patch-id
         run: |
           cd $Setup_Dir
-          echo "patch_id=$(git show -s --date=short --format="%h")" >> $GITHUB_ENV          
-          
+          echo "patch_id=$(git show -s --date=short --format="%h")" >> $GITHUB_ENV
+
       - name: Patch Kernel
         run: |
           cp $Setup_Dir/setup.sh $KernelSU_Dir/kernel/setup.sh
           cd $KernelSU_Dir
           tar czf "KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" .[!.]* *
-  
+
       - name: Upload KernelSU Patch
-        uses: actions/upload-artifact@v3.1.2
+        uses: actions/upload-artifact@v4
         with:
           name: KernelSU_Patched
           path: ${{ env.KernelSU_Dir }}/KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz
           retention-days: 5
-          
+
       - name: Upload KernelSU Manager Package
-        uses: actions/upload-artifact@v3.1.2
+        uses: actions/upload-artifact@v4
         with:
           name: KernelSU_Manager
           path: ${{ env.Setup_Dir }}/*.apk
-          retention-days: 5          
-          
+          retention-days: 5
+
   Collect_Config_Complie:
     needs: Patch_KernelSU
     runs-on: ubuntu-latest
     steps:
-    
-    - name: Collecting config
-      id: collect_config
-      run: |
-        echo "Debug=${{ secrets.Debug }}" >> $GITHUB_ENV
-        
-    - name: Setting Job
-      id: set_job
-      if: ${{ env.Debug == 'true' }}
-      run: exit 1
-      
+      - name: Collecting config
+        id: collect_config
+        run: |
+          echo "Debug=${{ secrets.Debug }}" >> $GITHUB_ENV
+
+      - name: Setting Job
+        id: set_job
+        if: ${{ env.Debug == 'true' }}
+        run: exit 1
+
   Collect_Config_Release:
     needs: Patch_KernelSU
     runs-on: ubuntu-latest
     steps:
-    
-    - name: Collecting config
-      id: collect_config
-      run: |
-        echo "ALLOW_RELEASE=${{ secrets.ALLOW_RELEASE }}" >> $GITHUB_ENV
-        
-    - name: Setting Job
-      id: set_job
-      if: ${{ env.ALLOW_RELEASE == 'false' }}
-      run: exit 1    
-      
-        
-  Complie_Evolution:
-      needs: Collect_Config_Complie
-      runs-on: ubuntu-latest
-      env:
-        CheckOut_DIR: /home/runner/work/kernel_xiaomi_raphael-ex/kernel_xiaomi_raphael-ex
-        AnyKernel: /home/runner/work/kernel_xiaomi_raphael-ex/AnyKernel
-        test_patch: false
-      steps:
+      - name: Collecting config
+        id: collect_config
+        run: |
+          echo "ALLOW_RELEASE=${{ secrets.ALLOW_RELEASE }}" >> $GITHUB_ENV
 
+      - name: Setting Job
+        id: set_job
+        if: ${{ env.ALLOW_RELEASE == 'false' }}
+        run: exit 1
+
+  Compile_Raphael_Android16:
+    needs: Collect_Config_Complie
+    runs-on: ubuntu-latest
+    env:
+      CheckOut_DIR: /home/runner/work/kernel_xiaomi_raphael-pixel
+      AnyKernel: /home/runner/work/AnyKernel
+      KBUILD_BUILD_USER: NATO66613
+      KBUILD_BUILD_HOST: KREMLIN
+    steps:
       - name: Set current time
         id: set_time
         run: echo "time=$(date +'%Y-%m-%d_%H-%M-%S')" >> $GITHUB_ENV
-            
+
       - name: Installing Dependencies
-        if: ${{ env.test_patch != 'true' }}
         run: |
           sudo apt update -y
-          sudo apt-get install -y zip flex bison libncurses-dev gawk  libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache
+          sudo apt-get install -y zip flex bison libncurses-dev gawk libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache qemu-user-static binfmt-support
           sudo apt clean
-          
-      - name: Clone Kernel Tree
-        if: ${{ env.test_patch != 'true' }}
+
+      - name: Setup QEMU user mode
         run: |
-          git clone https://github.com/SoDebug/kernel_xiaomi_raphael-ex.git -b tiramisu $CheckOut_DIR
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          create-symlink: true
+          key: kernel-build-cache-raphael16
+          restore-keys: |
+            kernel-build-cache-raphael16
+          max-size: '10G'
+
+      - name: Restore Clang toolchain cache (Android 16)
+        id: restore-clang
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/clang
+          key: clang-r547379-android16
+
+      - name: Clone Kernel Tree (Geeeeeker/raphael-pixel 16.0-susfs)
+        run: |
+          git clone https://github.com/Geeeeeker/kernel_xiaomi_raphael-pixel -b 16.0-susfs $CheckOut_DIR
 
       - name: Download KernelSU_Patched
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: KernelSU_Patched
           path: ${{ env.CheckOut_DIR }}/KernelSU
-          
+
       - name: Integrate KernelSU
         run: |
           cd ${{ env.CheckOut_DIR }}/KernelSU
@@ -132,250 +147,358 @@ jobs:
           rm -rf drivers/staging/kernelsu
           sh KernelSU/kernel/setup.sh
 
-      - name: Cloning Sources and Toolchain
-        if: ${{ env.test_patch != 'true' }}        
+      - name: Add rtl8188eus WiFi driver
         run: |
-          git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 --depth=1 -b master ~/clang
-          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/aarch64-linux-android-4.9
-          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/arm-linux-androideabi-4.9
-          git clone https://github.com/SoDebug/AnyKernel.git ${{ env.AnyKernel }}          
-
-      - name: Compiling Kernel
-        if: ${{ env.test_patch != 'true' }}      
-        id: compile
-        run: |
-          CLANG=~/clang/clang-r487747c/bin
-          GCC32=~/arm-linux-androideabi-4.9/bin
-          GCC64=~/aarch64-linux-android-4.9/bin
-          PATH=$CLANG:$GCC64:$GCC32:$PATH
-          export PATH
-          export ARCH=arm64
-          export CLANG_TRIPLE=aarch64-linux-gnu
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-          output_dir=out
           cd ${{ env.CheckOut_DIR }}
-          make LLVM=1 LLVM_IAS=1 CC="ccache clang" raphael_defconfig
-          make LLVM=1 LLVM_IAS=1 CC="ccache clang" -j$(grep -c ^processor /proc/cpuinfo)
-          
-      - name: Packaging the Kernel
-        if: ${{ env.test_patch != 'true' }}
-        id: package
-        run: |
-          cp -v ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/Image.gz-dtb ${{ env.AnyKernel }} &&
-          cp -v ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/dtbo.img ${{ env.AnyKernel }}/o
-          cd ${{ env.AnyKernel }}
-          7z a -mx9 "Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_Evolution_13.zip" *
-          
-      - name: Upload output_files directory
-        if: ${{ env.test_patch != 'true' }}
-        uses: actions/upload-artifact@main
-        with:
-          name: Raphael-Kernel_KSU_Dev_Evolution_13
-          path: ${{ env.AnyKernel }}/Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_Evolution_13.zip
-          
-  Complie_SOVIET-ANDROID:
-      needs: Collect_Config_Complie
-      runs-on: ubuntu-latest
-      env:
-        CheckOut_DIR: /home/runner/work/kernel_xiaomi_raphael-ex/kernel_xiaomi_raphael
-        AnyKernel: /home/runner/work/kernel_xiaomi_raphael-ex/AnyKernel
-        test_patch: false
-      steps:
+          export GIT_ASKPASS=echo
+          git clone --depth=1 --branch master https://github.com/Geeeeeker/android_kernel_xiaomi_sdm845.git rtl8188eus-repo
+          if [ -d "rtl8188eus-repo/drivers/rtl8188eus" ]; then
+            cp -r rtl8188eus-repo/drivers/rtl8188eus drivers/
+            echo "obj-\$(CONFIG_RTL8188EU) += rtl8188eus/" >> drivers/Makefile
+            echo 'source "drivers/rtl8188eus/Kconfig"' >> drivers/Kconfig
+          else
+            echo "Error: rtl8188eus directory not found in cloned repo"
+            exit 1
+          fi
+          rm -rf rtl8188eus-repo
 
-      - name: Set current time
-        id: set_time
-        run: echo "time=$(date +'%Y-%m-%d_%H-%M-%S')" >> $GITHUB_ENV
-            
-      - name: Installing Dependencies
-        if: ${{ env.test_patch != 'true' }}
+      - name: Download and deploy Clang (Android 16)
+        if: steps.restore-clang.outputs.cache-hit != 'true'
         run: |
-          sudo apt update -y
-          sudo apt-get install -y zip flex bison libncurses-dev gawk  libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache
-          sudo apt clean
-          
-      - name: Clone Kernel Tree
-        if: ${{ env.test_patch != 'true' }}
-        run: |
-          git clone -b 13.0_0516 https://github.com/SoDebug/kernel_xiaomi_raphael.git $CheckOut_DIR
+          mkdir -p /home/runner/clang
+          curl -LSs "https://github.com/Geeeeeker/boot/releases/download/clang-prebuilts-20260319-031015/clang-r547379.tar.gz" |
+          tar xz -C /home/runner/clang --strip-components=1
 
-      - name: Download KernelSU_Patched
-        uses: actions/download-artifact@v3
+      - name: Save Clang cache
+        if: steps.restore-clang.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
         with:
-          name: KernelSU_Patched
-          path: ${{ env.CheckOut_DIR }}/KernelSU
-          
-      - name: Integrate KernelSU
+          path: /home/runner/clang
+          key: clang-r547379-android16
+
+      - name: Configure kernel and apply source fixes
         run: |
-          cd ${{ env.CheckOut_DIR }}/KernelSU
-          tar -xzf KernelSU_*_Patched_*.tar.gz
-          echo "kernelsu_id=$(git show -s --date=short --format="%h")" >> $GITHUB_ENV
-          git_count=$(git rev-list --count HEAD)
-          kernelsu_version=$(expr 10000 + $git_count + 200)
-          echo "kernelsu_version=$kernelsu_version" >> $GITHUB_ENV
-          rm KernelSU_*_Patched_*.tar.gz
+          cd ${{ env.CheckOut_DIR }}
+          DEFCONFIG="arch/arm64/configs/raphael_defconfig"
+
+          # 应用 defconfig 修改
+          echo "CONFIG_MODULES=y" >> $DEFCONFIG
+          echo "CONFIG_KPROBES=y" >> $DEFCONFIG
+          echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
+          echo "CONFIG_KPROBE_EVENTS=y" >> $DEFCONFIG
+          echo "CONFIG_OVERLAY_FS=y" >> $DEFCONFIG
+          sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/' $DEFCONFIG
+          sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/' $DEFCONFIG
+          sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/' $DEFCONFIG
+          echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
+          echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
+          echo "CONFIG_BPF_JIT=y" >> $DEFCONFIG
+          echo "# CONFIG_BPF_JIT_ALWAYS_ON is not set" >> $DEFCONFIG
+          echo "CONFIG_BPF_SYSCALL=y" >> $DEFCONFIG
+
+          echo "CONFIG_SYSVIPC=y" >> $DEFCONFIG
+          echo "CONFIG_SYSVIPC_SYSCTL=y" >> $DEFCONFIG
+          echo "CONFIG_SYSVIPC_COMPAT=y" >> $DEFCONFIG
+          echo "CONFIG_EPOLL=y" >> $DEFCONFIG
+          echo "CONFIG_EVENTFD=y" >> $DEFCONFIG
+          echo "CONFIG_SIGNALFD=y" >> $DEFCONFIG
+          echo "CONFIG_INOTIFY_USER=y" >> $DEFCONFIG
+          echo "CONFIG_SHMEM=y" >> $DEFCONFIG
+          echo "CONFIG_TMPFS=y" >> $DEFCONFIG
+          echo "CONFIG_TMPFS_POSIX_ACL=y" >> $DEFCONFIG
+          echo "CONFIG_TMPFS_XATTR=y" >> $DEFCONFIG
+
+          echo "CONFIG_USBIP_CORE=m" >> $DEFCONFIG
+          echo "CONFIG_USBIP_VHCI_HCD=m" >> $DEFCONFIG
+          echo "CONFIG_USBIP_HOST=m" >> $DEFCONFIG
+
+          echo "CONFIG_SECTION_MISMATCH_WARN_ONLY=y" >> $DEFCONFIG
+          echo "CONFIG_BACKLIGHT_CLASS_DEVICE=y" >> $DEFCONFIG
+          echo "CONFIG_BACKLIGHT_QCOM=y" >> $DEFCONFIG
+          echo "CONFIG_MODVERSIONS=n" >> $DEFCONFIG
+
+          echo "CONFIG_ZRAM=y" >> $DEFCONFIG
+          echo "CONFIG_RTL8188EU=y" >> $DEFCONFIG
+
+          echo "CONFIG_USB_SERIAL=y" >> $DEFCONFIG
+          echo "CONFIG_USB_SERIAL_CONSOLE=y" >> $DEFCONFIG
+          echo "CONFIG_USB_SERIAL_GENERIC=y" >> $DEFCONFIG
+          echo "CONFIG_USB_SERIAL_CH341=y" >> $DEFCONFIG
+          echo "CONFIG_USB_SERIAL_FTDI_SIO=y" >> $DEFCONFIG
+          echo "CONFIG_USB_SERIAL_CP210X=y" >> $DEFCONFIG
+          echo "CONFIG_USB_SERIAL_PL2303=y" >> $DEFCONFIG
+
+          echo "CONFIG_ANDROID=y" >> $DEFCONFIG
+          echo "CONFIG_ANDROID_BINDER_IPC=y" >> $DEFCONFIG
+          echo "CONFIG_ANDROID_BINDER_DEVICES=\"binder,hwbinder,vndbinder\"" >> $DEFCONFIG
+
+          echo "# CONFIG_TRACING is not set" >> $DEFCONFIG
+          echo "# CONFIG_FTRACE is not set" >> $DEFCONFIG
+
+          echo "CONFIG_KSU=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_KPROBE_HOOKS=y" >> $DEFCONFIG
+
+          # 清理 BTRFS/ZSTD 配置
+          sed -i '/CONFIG_BTRFS_FS/d' $DEFCONFIG
+          sed -i '/CONFIG_ZSTD/d' $DEFCONFIG
+          sed -i '/CONFIG_CRYPTO_ZSTD/d' $DEFCONFIG
+          echo "# CONFIG_BTRFS_FS is not set" >> $DEFCONFIG
+          echo "# CONFIG_BTRFS_FS_ZSTD is not set" >> $DEFCONFIG
+          echo "# CONFIG_ZSTD_COMPRESS is not set" >> $DEFCONFIG
+          echo "# CONFIG_ZSTD_DECOMPRESS is not set" >> $DEFCONFIG
+
+          rm -rf utils
+          git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
+
+          sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
+          sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
+          sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
+          sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
+
+          echo 'source "utils/Kconfig"' >> "Kconfig"
+          echo "CONFIG_DOCKER=y" >> $DEFCONFIG
+
+          echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
+          echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
+
+          sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' $DEFCONFIG
+          echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> $DEFCONFIG
+
+          echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
+          echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
+
+          # 修复设备树语法错误
+          sed -i '/sdm845-v2-qvr-evt.dtb/d' arch/arm64/boot/dts/qcom/Makefile
+          sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
+          sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
+
+          # 应用源代码补丁
+          echo "Applying source fixes for old kernel..."
+
+          if ! grep -q "typedef.*vm_fault_t" include/linux/mm_types.h; then
+              sed -i '/#include <linux\/mm_types_task.h>/i typedef int vm_fault_t;' include/linux/mm_types.h
+          fi
+
+          awk '
+          BEGIN { count=0; skip=0 }
+          /^static inline void \*kvcalloc/ {
+              count++
+              if (count == 2) skip=1
+          }
+          skip && /^}/ {
+              skip=0
+              next
+          }
+          !skip
+          ' include/linux/mm.h > mm.h.tmp && mv mm.h.tmp include/linux/mm.h
+
+          chmod +x utils/runcpatch.sh
+          if [ -f kernel/cgroup/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup/cgroup.c
+          fi
+          if [ -f kernel/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup.c
+          fi
+          if [ -f net/netfilter/xt_qtaguid.c ]; then
+              patch -p0 < utils/xt_qtaguid.patch || true
+          fi
+
+          CFQ_FILE="block/cfq-iosched.c"
+          if [ -f "$CFQ_FILE" ]; then
+              sed -i '/^#define cfq_log_cfqq/,/while (0)/ { /break;/d; }' "$CFQ_FILE"
+              echo "Fixed cfq_log_cfqq macro in $CFQ_FILE"
+          fi
+
+      - name: Build the kernel with ccache
+        run: |
+          export CLANG_PATH=/home/runner/clang/bin
+          export PATH=${CLANG_PATH}:${PATH}
+
+          cd ${{ env.CheckOut_DIR }}
+          make LLVM=1 LLVM_IAS=1 CC="ccache clang" raphael_defconfig O=out
+
+          cd out
+          sed -i 's/^CONFIG_BTRFS_FS=[ym]$/# CONFIG_BTRFS_FS is not set/' .config
+          sed -i 's/^CONFIG_BTRFS_FS_ZSTD=[ym]$/# CONFIG_BTRFS_FS_ZSTD is not set/' .config
+          sed -i 's/^CONFIG_XOR_BLOCKS=[ym]$/# CONFIG_XOR_BLOCKS is not set/' .config
+          sed -i 's/^CONFIG_RAID6_PQ=[ym]$/# CONFIG_RAID6_PQ is not set/' .config
+          make LLVM=1 LLVM_IAS=1 CC="ccache clang" olddefconfig
           cd ..
-          rm -rf drivers/staging/kernelsu
-          sh KernelSU/kernel/setup.sh
 
-      - name: Cloning Sources and Toolchain
-        if: ${{ env.test_patch != 'true' }}        
+          make LLVM=1 LLVM_IAS=1 CC="ccache clang" -j$(grep -c ^processor /proc/cpuinfo) O=out
+          ccache --show-stats
+          ccache --show-config
+
+      - name: Build USB/IP kernel modules
         run: |
-          git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 --depth=1 -b master ~/clang
-          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/aarch64-linux-android-4.9
-          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/arm-linux-androideabi-4.9
-          git clone https://github.com/SoDebug/AnyKernel.git ${{ env.AnyKernel }}    
-          
-      - name: Compiling Kernel
-        if: ${{ env.test_patch != 'true' }}      
-        id: compile
-        run: |
-          CLANG=~/clang/clang-r487747c/bin
-          GCC32=~/arm-linux-androideabi-4.9/bin
-          GCC64=~/aarch64-linux-android-4.9/bin
-          PATH=$CLANG:$GCC64:$GCC32:$PATH
-          export PATH
-          export ARCH=arm64
-          export CLANG_TRIPLE=aarch64-linux-gnu
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-          output_dir=out
+          export CLANG_PATH=/home/runner/clang/bin
+          export PATH=${CLANG_PATH}:${PATH}
           cd ${{ env.CheckOut_DIR }}
-          make LLVM=1 LLVM_IAS=1 CC="ccache clang" raphael_defconfig
-          make LLVM=1 LLVM_IAS=1 CC="ccache clang" -j$(grep -c ^processor /proc/cpuinfo)
-          
-      - name: Packaging the Kernel
-        if: ${{ env.test_patch != 'true' }}
-        id: package
-        run: |
-          cp -v ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/Image.gz-dtb ${{ env.AnyKernel }} &&
-          cp -v ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/dtbo.img ${{ env.AnyKernel }}/o
-          cd ${{ env.AnyKernel }}
-          7z a -mx9 "Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_13.zip" *
-          
-      - name: Upload output_files directory
-        if: ${{ env.test_patch != 'true' }}
-        uses: actions/upload-artifact@main
-        with:
-          name: Raphael-Kernel_KSU_Dev_SOVIET-ANDROID_13
-          path: ${{ env.AnyKernel }}/Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_13.zip          
+          make -j$(nproc --all) \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            O=out \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            M=drivers/usb/usbip \
+            modules
+          mkdir -p $GITHUB_WORKSPACE/usbip-out/modules
+          cp out/drivers/usb/usbip/*.ko $GITHUB_WORKSPACE/usbip-out/modules/
 
-  Complie_SOVIET-ANDROID_beta:
-      needs: Collect_Config_Complie
-      runs-on: ubuntu-latest
-      env:
-        CheckOut_DIR: /home/runner/work/kernel_xiaomi_raphael-ex/kernel_xiaomi_raphael
-        AnyKernel: /home/runner/work/kernel_xiaomi_raphael-ex/AnyKernel
-        test_patch: false
-      steps:
+      - name: Build USB/IP userspace tools (Docker arm64)
+        run: |
+          mkdir -p usbip-out/{bin,libs}
+          docker run --rm --platform linux/arm64 \
+            --memory=4g \
+            -v ${{ github.workspace }}:/workspace \
+            -v ${{ github.workspace }}/usbip-out:/output \
+            -w /workspace \
+            arm64v8/ubuntu:22.04 \
+            bash -c "
+              set -e
+              export DEBIAN_FRONTEND=noninteractive
+              ulimit -s unlimited
+              apt update
+              apt install -y \
+                build-essential \
+                autoconf \
+                libtool \
+                pkg-config \
+                libudev-dev \
+                libssl-dev \
+                flex \
+                bison \
+                file
+              cd tools/usb/usbip
+              ./autogen.sh
+              ./configure CFLAGS=\"-O0 -Wno-error\" --prefix=/usr
+              make CFLAGS=\"-O0 -Wno-error\" -j1
+              cp src/.libs/usbip /output/bin/
+              cp src/.libs/usbipd /output/bin/
+              cp libsrc/.libs/libusbip.so.0* /output/libs/
+              cd /output
+              BINARIES=\"bin/usbip bin/usbipd libs/libusbip.so.0*\"
+              DEPS=\"\"
+              for file in \$BINARIES; do
+                if [ -f \"\$file\" ]; then
+                  echo \"Collecting dependencies for \$file...\"
+                  needed=\$(readelf -d \"\$file\" | grep NEEDED | awk '{print \$5}' | tr -d '[]' || true)
+                  for lib in \$needed; do
+                    if [[ \"\$DEPS\" != *\"\$lib\"* ]]; then
+                      DEPS=\"\$DEPS \$lib\"
+                    fi
+                  done
+                fi
+              done
+              for lib in \$(echo \$DEPS | tr ' ' '\\n' | sort -u); do
+                echo \"Searching for library: \$lib\"
+                libpath=\$(find /lib /usr/lib -name \"\$lib\" -type f 2>/dev/null | head -1 || true)
+                if [ -n \"\$libpath\" ]; then
+                  echo \"Found: \$libpath\"
+                  cp -P \"\$libpath\" libs/ 2>/dev/null || cp \"\$libpath\" libs/
+                  for reallib in \$(find \"\$(dirname \"\$libpath\")\" -name \"\${lib%.so*}*\" -type f 2>/dev/null); do
+                    cp -n \"\$reallib\" libs/ 2>/dev/null || true
+                  done
+                else
+                  echo \"Warning: library \$lib not found\"
+                fi
+              done
+              ld_linux=\"/lib/ld-linux-aarch64.so.1\"
+              if [ -f \"\$ld_linux\" ]; then
+                cp -P \"\$ld_linux\" libs/
+              fi
+              echo \"USB/IP user-space tools build complete.\"
+            "
 
-      - name: Set current time
-        id: set_time
-        run: echo "time=$(date +'%Y-%m-%d_%H-%M-%S')" >> $GITHUB_ENV
-            
-      - name: Installing Dependencies
-        if: ${{ env.test_patch != 'true' }}
+      - name: Package USB/IP artifacts
         run: |
-          sudo apt update -y
-          sudo apt-get install -y zip flex bison libncurses-dev gawk  libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache
-          sudo apt clean
-          
-      - name: Clone Kernel Tree
-        if: ${{ env.test_patch != 'true' }}
-        run: |
-          git clone -b beta https://github.com/SoDebug/kernel_xiaomi_raphael.git $CheckOut_DIR
-
-      - name: Download KernelSU_Patched
-        uses: actions/download-artifact@v3
-        with:
-          name: KernelSU_Patched
-          path: ${{ env.CheckOut_DIR }}/KernelSU
-          
-      - name: Integrate KernelSU
-        run: |
-          cd ${{ env.CheckOut_DIR }}/KernelSU
-          tar -xzf KernelSU_*_Patched_*.tar.gz
-          echo "kernelsu_id=$(git show -s --date=short --format="%h")" >> $GITHUB_ENV
-          git_count=$(git rev-list --count HEAD)
-          kernelsu_version=$(expr 10000 + $git_count + 200)
-          echo "kernelsu_version=$kernelsu_version" >> $GITHUB_ENV
-          rm KernelSU_*_Patched_*.tar.gz
+          cd usbip-out
+          tar czf ../usbip-arm64-bundle.tar.gz .
           cd ..
-          rm -rf drivers/staging/kernelsu
-          sh KernelSU/kernel/setup.sh
 
-      - name: Cloning Sources and Toolchain
-        if: ${{ env.test_patch != 'true' }}        
-        run: |
-          git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 --depth=1 -b master ~/clang
-          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/aarch64-linux-android-4.9
-          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/arm-linux-androideabi-4.9
-          git clone https://github.com/SoDebug/AnyKernel.git ${{ env.AnyKernel }}     
-
-      - name: Compiling Kernel
-        if: ${{ env.test_patch != 'true' }}      
-        id: compile
-        run: |
-          CLANG=~/clang/clang-r487747c/bin
-          GCC32=~/arm-linux-androideabi-4.9/bin
-          GCC64=~/aarch64-linux-android-4.9/bin
-          PATH=$CLANG:$GCC64:$GCC32:$PATH
-          export PATH
-          export ARCH=arm64
-          export CLANG_TRIPLE=aarch64-linux-gnu
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-          output_dir=out
-          cd ${{ env.CheckOut_DIR }}
-          make LLVM=1 LLVM_IAS=1 CC="ccache clang" raphael_defconfig
-          make LLVM=1 LLVM_IAS=1 CC="ccache clang" -j$(grep -c ^processor /proc/cpuinfo)
-          
-      - name: Packaging the Kernel
-        if: ${{ env.test_patch != 'true' }}
-        id: package
-        run: |
-          cp -v ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/Image.gz-dtb ${{ env.AnyKernel }} &&
-          cp -v ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/dtbo.img ${{ env.AnyKernel }}/o
-          cd ${{ env.AnyKernel }}
-          7z a -mx9 "Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_13_beta.zip" *
-          
-      - name: Upload output_files directory
-        if: ${{ env.test_patch != 'true' }}
-        uses: actions/upload-artifact@main
+      - name: Upload USB/IP bundle
+        uses: actions/upload-artifact@v4
         with:
-          name: Raphael-Kernel_KSU_Dev_SOVIET-ANDROID_13_beta
-          path: ${{ env.AnyKernel }}/Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_13_beta.zip
-          
+          name: usbip-arm64-bundle
+          path: usbip-arm64-bundle.tar.gz
+
+      - name: Extract rtl8188.ko module
+        run: |
+          cd ${{ env.CheckOut_DIR }}
+          mkdir -p $GITHUB_WORKSPACE/rtl8188-module
+          RTL_MODULE=$(find out -name "rtl8188.ko" -type f | head -1)
+          if [ -n "$RTL_MODULE" ]; then
+            cp "$RTL_MODULE" $GITHUB_WORKSPACE/rtl8188-module/rtl8188.ko
+            echo "rtl8188.ko copied from $RTL_MODULE"
+          else
+            RTL_ALT=$(find out -name "*8188*.ko" -type f | head -1)
+            if [ -n "$RTL_ALT" ]; then
+              cp "$RTL_ALT" $GITHUB_WORKSPACE/rtl8188-module/rtl8188.ko
+              echo "Copied alternative module as rtl8188.ko from $RTL_ALT"
+            else
+              echo "Error: No rtl8188 related module found"
+              exit 1
+            fi
+          fi
+          cd $GITHUB_WORKSPACE/rtl8188-module
+          tar czf ../rtl8188-module.tar.gz rtl8188.ko
+          cd $GITHUB_WORKSPACE
+
+      - name: Upload rtl8188 Module Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtl8188-module
+          path: rtl8188-module.tar.gz
+
+      - name: Repack Kernel Artifacts (AnyKernel3)
+        run: |
+          git clone --depth=1 https://github.com/SOVIET-ANDROID/AnyKernel3.git $HOME/AnyKernel3
+          cp ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/Image.gz-dtb $HOME/AnyKernel3/
+          cp ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/dtbo.img $HOME/AnyKernel3/
+          BRANCH=$(echo "${GITHUB_REF#refs/heads/}" | sed 's|/|-|g')
+          COMMIT_HASH=$(echo "$GITHUB_SHA" | cut -c1-6)
+          ZIP_NAME="${BRANCH}-${COMMIT_HASH}.zip"
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          cd $HOME/AnyKernel3
+          zip -r9 $GITHUB_WORKSPACE/${ZIP_NAME} .
+          cd $GITHUB_WORKSPACE
+          ls -lah ${ZIP_NAME}
+
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ github.workspace }}/${{ env.ZIP_NAME }}
+
   Release:
-      needs: [Complie_Evolution,Collect_Config_Release,Complie_SOVIET-ANDROID,Complie_SOVIET-ANDROID_beta]
-      runs-on: ubuntu-latest
-      env:
-        Release_DIR: /home/runner/work/release
-      steps:
-      
+    needs: [Compile_Raphael_Android16, Collect_Config_Release]
+    runs-on: ubuntu-latest
+    env:
+      Release_DIR: /home/runner/work/release
+    steps:
       - name: Set current time
         id: set_time
         run: echo "time=$(date +'%Y-%m-%d_%H-%M-%S')" >> "$GITHUB_OUTPUT"
-   
+
       - name: Generate release tag
         id: tag
         run: |
           echo "release_tag=$(date +"%Y%m%d")" >> $GITHUB_OUTPUT
           touch release.txt
           echo "SoDebug Kernel Config：" >> release.txt
-          echo "Device Code:raphael" >> release.txt
+          echo "Device Code: raphael" >> release.txt
           echo "Device Name：Redmi K20 Pro | Mi 9T Pro" >> release.txt
-          echo "Support Android：13.0" >> release.txt   
-          echo "KernelSU Git Verion：***" >> release.txt
-          echo "KernelSU Verion: *****" >> release.txt
+          echo "Support Android：16.0" >> release.txt
+          echo "KernelSU Git Version：***" >> release.txt
+          echo "KernelSU Version: *****" >> release.txt
           echo "Patch ID: *******" >> release.txt
           echo "KernelSU ID: *******" >> release.txt
-          echo "Tested: undefine" >> release.txt
+          echo "Tested: undefined" >> release.txt
           echo "Build Date: $(date +"%Y/%m/%d")" >> release.txt
           echo "status=success" >> $GITHUB_OUTPUT
 
       - name: Download all workflow run artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: ${{ env.Release_DIR }}
 
@@ -385,12 +508,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: v.${{ steps.tag.outputs.release_tag }}
-          name: ${{ steps.tag.outputs.release_tag }} Kernel for Raphael
+          name: ${{ steps.tag.outputs.release_tag }} Kernel for Raphael (Android 16)
           body_path: release.txt
           files: |
             ${{ env.Release_DIR }}/KernelSU_Patched/*.tar.gz
             ${{ env.Release_DIR }}/KernelSU_Manager/*.apk
-            ${{ env.Release_DIR }}/Raphael-Kernel_KSU_Dev_Evolution_13/*.zip
-            ${{ env.Release_DIR }}/Raphael-Kernel_KSU_Dev_SOVIET-ANDROID_13/*.zip
-            ${{ env.Release_DIR }}/Raphael-Kernel_KSU_Dev_SOVIET-ANDROID_13_beta/*.zip
-            
+            ${{ env.Release_DIR }}/*.zip
+            ${{ env.Release_DIR }}/usbip-arm64-bundle.tar.gz
+            ${{ env.Release_DIR }}/rtl8188-module.tar.gz

@@ -92,7 +92,6 @@ jobs:
           sudo apt update -y
           sudo apt-get install -y zip flex bison libncurses-dev gawk libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache automake libtool pkg-config libudev-dev
           sudo apt clean
-
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
@@ -106,7 +105,6 @@ jobs:
         if: ${{ env.test_patch != 'true' }}
         run: |
           git clone -b 16.0 https://github.com/Geeeeeker/kernel_xiaomi_raphael-pixel.git "$CheckOut_DIR"
-
       - name: Download KernelSU_Patched Artifact
         uses: actions/download-artifact@v4
         with:
@@ -132,7 +130,6 @@ jobs:
           fi
           echo "KernelSU integration check:"
           ls -la drivers/staging/kernelsu/
-
       - name: Integrate rtl8188eus WiFi driver source
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -152,7 +149,6 @@ jobs:
           fi
           rm -rf rtl8188eus-repo
           echo "rtl8188eus driver source integrated."
-
       - name: Prepare Toolchains
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -163,14 +159,12 @@ jobs:
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/aarch64-linux-android-4.9
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/arm-linux-androideabi-4.9
           git clone https://github.com/SoDebug/AnyKernel.git "${{ env.AnyKernel }}"
-
       # ---------- 新增：配置与 Docker 集成 ----------
       - name: Apply Kernel Config and Docker Support
         if: ${{ env.test_patch != 'true' }}
         run: |
           cd "${{ env.CheckOut_DIR }}"
           DEFCONFIG="arch/arm64/configs/raphael_defconfig"
-
           # 追加全部所需配置项
           echo "CONFIG_MODULES=y" >> $DEFCONFIG
           echo "CONFIG_KPROBES=y" >> $DEFCONFIG
@@ -225,7 +219,6 @@ jobs:
           echo "CONFIG_USB_SERIAL_FTDI_SIO=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL_CP210X=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL_PL2303=y" >> $DEFCONFIG
-
           # 移除原有 utils 目录并克隆 Docker 支持仓库
           rm -rf utils
           git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
@@ -234,13 +227,11 @@ jobs:
           sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
           sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
           sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
-
           # 将 utils 的 Kconfig 加入顶层 Kconfig
           if ! grep -q 'source "utils/Kconfig"' Kconfig; then
             echo 'source "utils/Kconfig"' >> Kconfig
           fi
           echo "CONFIG_DOCKER=y" >> $DEFCONFIG
-
           # 禁用冲突特性
           echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
           echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
@@ -248,12 +239,10 @@ jobs:
           echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> $DEFCONFIG
           echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
           echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
-
           # 修复设备树错误
           sed -i '/sdm845-v2-qvr-evt.dtb/d' arch/arm64/boot/dts/qcom/Makefile
           sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
           sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
-
           # 应用 runc/qtaguid 补丁
           chmod +x utils/runcpatch.sh
           if [ -f kernel/cgroup/cgroup.c ]; then
@@ -265,12 +254,16 @@ jobs:
           if [ -f net/netfilter/xt_qtaguid.c ]; then
               patch -p0 < utils/xt_qtaguid.patch
           fi
-     - name: Fix btrfs timespec type error
+
+      # ---------- 修复 btrfs 类型错误（第 78 行附近）----------
+      - name: Fix btrfs timespec64 type mismatch
+        if: ${{ env.test_patch != 'true' }}
         run: |
           cd "${{ env.CheckOut_DIR }}"
           sed -i 's/struct timespec now = current_time(&parent_inode->vfs_inode);/struct timespec64 now = current_time(\&parent_inode->vfs_inode);/' fs/btrfs/inode.c
-          
-          - name: Compile Kernel
+          echo "btrfs/inode.c patched for timespec64"
+
+      - name: Compile Kernel
         if: ${{ env.test_patch != 'true' }}
         run: |
           if [ -d ~/clang/clang-r547379/bin ]; then

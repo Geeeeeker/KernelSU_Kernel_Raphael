@@ -274,8 +274,12 @@ jobs:
           echo "CONFIG_IP_VS_RR=y" >> $DEFCONFIG
           echo "CONFIG_SECURITY_APPARMOR=y" >> $DEFCONFIG
           
-          # 【修复1】正确引用带双引号的字符串
           echo 'CONFIG_LOCALVERSION="-Geeeeeker-perf"' >> $DEFCONFIG
+          
+          # 禁用 CFQ 调度器（避免 Clang 编译错误）
+          sed -i 's/CONFIG_IOSCHED_CFQ=y/CONFIG_IOSCHED_CFQ=n/' $DEFCONFIG
+          echo "# CONFIG_IOSCHED_CFQ is not set" >> $DEFCONFIG
+          echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
           
           # 禁用部分 Docker 相关统计/带宽控制（按需）
           echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
@@ -313,6 +317,9 @@ jobs:
           make LLVM=1 LLVM_IAS=1 O=out raphael_defconfig
           # 确保 KernelSU 启用
           ./scripts/config --file out/.config --enable KSU
+          # 二次确保 CFQ 被禁用
+          ./scripts/config --file out/.config --disable IOSCHED_CFQ
+          ./scripts/config --file out/.config --disable CFQ_GROUP_IOSCHED
           # 应用之前的所有追加配置
           make LLVM=1 LLVM_IAS=1 O=out olddefconfig
           # 编译内核

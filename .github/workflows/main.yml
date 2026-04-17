@@ -101,7 +101,7 @@ jobs:
       - name: Installing Dependencies
         run: |
           sudo apt update -y
-          sudo apt-get install -y zip flex bison libncurses-dev gawk libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache qemu-user-static binfmt-support
+          sudo apt-get install -y zip flex bison libncurses-dev gawk libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache qemu-user-static binfmt-support lld
           sudo apt clean
 
       - name: Setup QEMU user mode
@@ -112,7 +112,7 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           create-symlink: true
-          key: kernel-build-cache-raphael16
+          key: kernel-build-cache-raphael16-v2
           restore-keys: |
             kernel-build-cache-raphael16
           max-size: '10G'
@@ -132,20 +132,30 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: KernelSU_Patched
-          path: ${{ env.CheckOut_DIR }}/KernelSU
+          path: ${{ env.CheckOut_DIR }}/KernelSU_Patch
 
-      - name: Integrate KernelSU
+      - name: Integrate KernelSU (if not already present)
         run: |
-          cd ${{ env.CheckOut_DIR }}/KernelSU
-          tar -xzf KernelSU_*_Patched_*.tar.gz
+          cd ${{ env.CheckOut_DIR }}
+          # 检查内核是否已经集成 KernelSU
+          if [ -d "drivers/staging/kernelsu" ]; then
+            echo "KernelSU already integrated in kernel source, skipping setup.sh"
+          else
+            echo "Integrating KernelSU..."
+            cd KernelSU_Patch
+            tar -xzf KernelSU_*_Patched_*.tar.gz
+            cd ..
+            mkdir -p drivers/staging
+            cp -r KernelSU_Patch/kernel drivers/staging/kernelsu
+            # 应用 setup.sh 补丁（仅当需要时）
+            # sh KernelSU_Patch/kernel/setup.sh
+          fi
+          # 提取版本信息
+          cd ${{ env.CheckOut_DIR }}/KernelSU_Patch
           echo "kernelsu_id=$(git show -s --date=short --format="%h")" >> $GITHUB_ENV
           git_count=$(git rev-list --count HEAD)
           kernelsu_version=$(expr 10000 + $git_count + 200)
           echo "kernelsu_version=$kernelsu_version" >> $GITHUB_ENV
-          rm KernelSU_*_Patched_*.tar.gz
-          cd ..
-          rm -rf drivers/staging/kernelsu
-          sh KernelSU/kernel/setup.sh
 
       - name: Add rtl8188eus WiFi driver
         run: |
@@ -168,6 +178,14 @@ jobs:
           mkdir -p /home/runner/clang
           curl -LSs "https://github.com/Geeeeeker/boot/releases/download/clang-prebuilts-20260319-031015/clang-r547379.tar.gz" |
           tar xz -C /home/runner/clang --strip-components=1
+          # 确保 ld.lld 存在，若没有则创建符号链接或使用系统 lld
+          if [ ! -f "/home/runner/clang/bin/ld.lld" ]; then
+            if [ -f "/home/runner/clang/bin/ld" ]; then
+              ln -s /home/runner/clang/bin/ld /home/runner/clang/bin/ld.lld
+            elif command -v ld.lld >/dev/null 2>&1; then
+              ln -s $(which ld.lld) /home/runner/clang/bin/ld.lld
+            fi
+          fi
 
       - name: Save Clang cache
         if: steps.restore-clang.outputs.cache-hit != 'true'
@@ -180,6 +198,12 @@ jobs:
         run: |
           cd ${{ env.CheckOut_DIR }}
           DEFCONFIG="arch/arm64/configs/raphael_defconfig"
+
+          # 确保 defconfig 存在
+          if [ ! -f "$DEFCONFIG" ]; then
+            echo "Error: $DEFCONFIG not found!"
+            exit 1
+          fi
 
           # 应用 defconfig 修改
           echo "CONFIG_MODULES=y" >> $DEFCONFIG
@@ -267,10 +291,12 @@ jobs:
           echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
           echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
 
-          # 修复设备树语法错误
-          sed -i '/sdm845-v2-qvr-evt.dtb/d' arch/arm64/boot/dts/qcom/Makefile
-          sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
-          sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
+          # 修复设备树语法错误（如果存在）
+          if [ -f "arch/arm64/boot/dts/qcom/Makefile" ]; then
+            sed -i '/sdm845-v2-qvr-evt.dtb/d' arch/arm64/boot/dts/qcom/Makefile
+            sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
+            sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
+          fi
 
           # 应用源代码补丁
           echo "Applying source fixes for old kernel..."
@@ -313,19 +339,20 @@ jobs:
         run: |
           export CLANG_PATH=/home/runner/clang/bin
           export PATH=${CLANG_PATH}:${PATH}
+          export LD=ld.lld
 
           cd ${{ env.CheckOut_DIR }}
-          make LLVM=1 LLVM_IAS=1 CC="ccache clang" raphael_defconfig O=out
+          make LLVM=1 LLVM_IAS=1 CC="ccache clang" LD=ld.lld raphael_defconfig O=out
 
           cd out
           sed -i 's/^CONFIG_BTRFS_FS=[ym]$/# CONFIG_BTRFS_FS is not set/' .config
           sed -i 's/^CONFIG_BTRFS_FS_ZSTD=[ym]$/# CONFIG_BTRFS_FS_ZSTD is not set/' .config
           sed -i 's/^CONFIG_XOR_BLOCKS=[ym]$/# CONFIG_XOR_BLOCKS is not set/' .config
           sed -i 's/^CONFIG_RAID6_PQ=[ym]$/# CONFIG_RAID6_PQ is not set/' .config
-          make LLVM=1 LLVM_IAS=1 CC="ccache clang" olddefconfig
+          make LLVM=1 LLVM_IAS=1 CC="ccache clang" LD=ld.lld olddefconfig
           cd ..
 
-          make LLVM=1 LLVM_IAS=1 CC="ccache clang" -j$(grep -c ^processor /proc/cpuinfo) O=out
+          make LLVM=1 LLVM_IAS=1 CC="ccache clang" LD=ld.lld -j$(grep -c ^processor /proc/cpuinfo) O=out
           ccache --show-stats
           ccache --show-config
 
@@ -333,6 +360,7 @@ jobs:
         run: |
           export CLANG_PATH=/home/runner/clang/bin
           export PATH=${CLANG_PATH}:${PATH}
+          export LD=ld.lld
           cd ${{ env.CheckOut_DIR }}
           make -j$(nproc --all) \
             ARCH=arm64 \

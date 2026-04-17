@@ -254,7 +254,13 @@ jobs:
           if [ -f net/netfilter/xt_qtaguid.c ]; then
               patch -p0 < utils/xt_qtaguid.patch
           fi
-
+      - name: Fix btrfs timespec64 type mismatch
+        if: ${{ env.test_patch != 'true' }}
+        run: |
+          cd "${{ env.CheckOut_DIR }}"
+          sed -i 's/struct timespec now = current_time(&parent_inode->vfs_inode);/struct timespec64 now = current_time(\&parent_inode->vfs_inode);/' fs/btrfs/inode.c
+          sed -i 's/struct timespec now = current_time(inode);/struct timespec64 now = current_time(inode);/' fs/btrfs/file.c
+          echo "btrfs/inode.c and file.c patched for timespec64"  
       # ---------- 修复 btrfs 类型错误（第 78 行附近）----------
       - name: Fix btrfs timespec64 type mismatch
         if: ${{ env.test_patch != 'true' }}

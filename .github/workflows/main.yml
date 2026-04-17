@@ -109,29 +109,33 @@ jobs:
           name: KernelSU_Patched
           path: ${{ env.CheckOut_DIR }}/KernelSU
 
-      - name: Integrate KernelSU into Kernel Source
+      - name: Integrate KernelSU into Kernel Source (Manual method)
         run: |
           cd "${{ env.CheckOut_DIR }}/KernelSU"
           tar -xzf KernelSU_*_Patched_*.tar.gz
           echo "kernelsu_id=$(cat kernelsu_id.txt)" >> $GITHUB_ENV
           echo "kernelsu_version=$(cat kernelsu_version.txt)" >> $GITHUB_ENV
           rm KernelSU_*_Patched_*.tar.gz kernelsu_id.txt kernelsu_version.txt
+          
           cd "${{ env.CheckOut_DIR }}"
-          # 清理旧目录并尝试执行官方脚本
+          # 清理旧痕迹
           rm -rf drivers/staging/kernelsu
-          sh KernelSU/kernel/setup.sh || echo "setup.sh may have failed, will manually fix"
-          # 强制创建必需的文件和链接
+          
+          # 创建目录和软链接
           mkdir -p drivers/staging/kernelsu
-          if [ ! -f drivers/staging/kernelsu/Makefile ]; then
-            echo "Manually creating KernelSU Makefile and symlink"
-            ln -sf ../../../KernelSU/kernel drivers/staging/kernelsu/KernelSU
-            cp KernelSU/kernel/Makefile drivers/staging/kernelsu/Makefile
-          fi
-          # 确保 Kconfig 被包含（如果内核源码未包含）
+          ln -sf ../../../KernelSU/kernel drivers/staging/kernelsu/KernelSU
+          
+          # 从 KernelSU 源码复制 Makefile 和 Kconfig（它们应位于 kernel/ 目录下）
+          cp KernelSU/kernel/Makefile drivers/staging/kernelsu/Makefile
+          cp KernelSU/kernel/Kconfig drivers/staging/kernelsu/Kconfig
+          
+          # 确保 drivers/Kconfig 包含对 KernelSU Kconfig 的引用（仅在未包含时添加）
           if ! grep -q "source \"drivers/staging/kernelsu/Kconfig\"" drivers/Kconfig; then
             echo 'source "drivers/staging/kernelsu/Kconfig"' >> drivers/Kconfig
           fi
+          
           # 验证整合结果
+          echo "KernelSU integration check:"
           ls -la drivers/staging/kernelsu/
 
       - name: Prepare Toolchains
@@ -179,13 +183,10 @@ jobs:
           cd "${{ env.CheckOut_DIR }}"
 
           make LLVM=1 LLVM_IAS=1 O=out raphael_defconfig
-          # 启用 KernelSU 配置
           ./scripts/config --file out/.config --enable KSU
-          # 关闭可能引起编译错误的调试选项（可选）
           ./scripts/config --file out/.config --disable DEBUG_INFO
           make LLVM=1 LLVM_IAS=1 O=out olddefconfig
-          # 开始编译，输出详细错误
-          make LLVM=1 LLVM_IAS=1 O=out -j$(nproc) V=1
+          make LLVM=1 LLVM_IAS=1 O=out -j$(nproc)
 
       - name: Package Kernel
         if: ${{ env.test_patch != 'true' }}

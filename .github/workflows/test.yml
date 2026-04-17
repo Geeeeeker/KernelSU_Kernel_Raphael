@@ -132,9 +132,13 @@ jobs:
       - name: Cloning Sources and Toolchain
         if: ${{ env.test_patch != 'true' }}
         run: |
-          # 精确拉取指定版本的 Clang 工具链 (clang-r547379)
-          git clone --depth 1 --branch clang-r547379 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 ~/clang
-          # GCC 交叉编译工具链保持不变（仅用于链接和二进制工具，实际编译使用 Clang）
+          # 下载预编译的 clang-r547379 压缩包
+          mkdir -p ~/clang
+          wget -q https://github.com/Geeeeeker/boot/releases/download/clang-prebuilts-20260319-031015/clang-r547379.tar.gz -O /tmp/clang.tar.gz
+          tar -xzf /tmp/clang.tar.gz -C ~/clang
+          rm /tmp/clang.tar.gz
+
+          # GCC 交叉编译工具链保持不变
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/aarch64-linux-android-4.9
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/arm-linux-androideabi-4.9
           git clone https://github.com/SoDebug/AnyKernel.git "${{ env.AnyKernel }}"
@@ -143,6 +147,7 @@ jobs:
         if: ${{ env.test_patch != 'true' }}
         id: compile
         run: |
+          # 注意：解压后目录名为 clang-r547379，因此 bin 路径如下
           CLANG=~/clang/clang-r547379/bin
           GCC32=~/arm-linux-androideabi-4.9/bin
           GCC64=~/aarch64-linux-android-4.9/bin
@@ -153,7 +158,7 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
-          # 强制指定 LLVM 工具链所有组件（解决 ld.lld / llvm-ar 找不到的问题）
+          # 强制指定 LLVM 工具链组件
           export LD=ld.lld
           export AR=llvm-ar
           export NM=llvm-nm
@@ -164,9 +169,7 @@ jobs:
 
           cd "${{ env.CheckOut_DIR }}"
 
-          # 生成 .config（根据内核源码的实际 defconfig 名称调整，此处假设为 raphael_defconfig）
           make LLVM=1 LLVM_IAS=1 O=out raphael_defconfig
-          # 并行编译
           make LLVM=1 LLVM_IAS=1 O=out -j$(nproc)
 
       - name: Packaging the Kernel

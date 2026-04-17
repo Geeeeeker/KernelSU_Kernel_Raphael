@@ -264,16 +264,29 @@ jobs:
           echo "CONFIG_ANDROID_BINDER_IPC=y" >> $DEFCONFIG
           echo "CONFIG_ANDROID_BINDER_DEVICES=\"binder,hwbinder,vndbinder\"" >> $DEFCONFIG
           
-          
           # 添加 Docker 支持配置
-          rm -rf utils
-          git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
-          sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
-          sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
-          sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
-          sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
-          sed -i '/select BRIDGE_VLAN_FILTERING/d' utils/Kconfig
-          echo 'source "utils/Kconfig"' >> "Kconfig"
+          echo "CONFIG_DOCKER=y" >> $DEFCONFIG
+          echo "CONFIG_PID_NS=y" >> $DEFCONFIG
+          echo "CONFIG_IPC_NS=y" >> $DEFCONFIG
+          echo "CONFIG_UTS_NS=y" >> $DEFCONFIG
+          echo "CONFIG_VETH=y" >> $DEFCONFIG
+          echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y" >> $DEFCONFIG
+          echo "CONFIG_NETFILTER_XT_MATCH_IPVS=y" >> $DEFCONFIG
+          echo "CONFIG_POSIX_MQUEUE=y" >> $DEFCONFIG
+          echo "CONFIG_CGROUP_PIDS=y" >> $DEFCONFIG
+          echo "CONFIG_BLK_DEV_THROTTLING=y" >> $DEFCONFIG
+          echo "CONFIG_CGROUP_PERF=yCONFIG_VXLAN" >> $DEFCONFIG
+          echo "CONFIG_CGROUP_HUGETLB=y" >> $DEFCONFIG
+          echo "CONFIG_NET_CLS_CGROUP=y" >> $DEFCONFIG
+          echo "CONFIG_CGROUP_NET_PRIO=y" >> $DEFCONFIG
+          echo "CONFIG_IP_VS=y" >> $DEFCONFIG
+          echo "CONFIG_IP_VS_NFCT=y" >> $DEFCONFIG
+          echo "CONFIG_IP_VS_PROTO_TCP=y" >> $DEFCONFIG
+          echo "CONFIG_IP_VS_PROTO_UDP=y" >> $DEFCONFIG
+          echo "CONFIG_IP_VS_RR=y" >> $DEFCONFIG
+          echo "CONFIG_SECURITY_APPARMOR=y" >> $DEFCONFIG
+          
+          echo "CONFIG_LOCALVERSION="-Geeeeeker-perf"
           echo "CONFIG_DOCKER=y" >> $DEFCONFIG
           echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
           echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG

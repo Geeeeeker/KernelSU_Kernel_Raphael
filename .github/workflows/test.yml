@@ -1,4 +1,4 @@
-name: Kernel CI (with USB/IP, CH340, RTL8188, Docker Support)
+name: Kernel CI (USB/IP + CH340 + RTL8188 + KernelSU Next)
 
 on:
   repository_dispatch:
@@ -8,65 +8,65 @@ on:
       - "main"
 
 jobs:
- Patch_KernelSU:
-  runs-on: ubuntu-latest
-  env:
-    KernelSU_Dir: /home/runner/work/KernelSU_Next
-    Setup_Dir: /home/runner/work/Setup_Dir
-    KSU_APK_URL: "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.2.0/KernelSU_Next_v3.2.0_33129-release.apk"
-  steps:
-    - name: Download KernelSU_Next source from official repo
-      run: |
-        mkdir -p "$KernelSU_Dir"
-        git clone https://github.com/KernelSU-Next/KernelSU-Next.git "$KernelSU_Dir"
+  Patch_KernelSU:
+    runs-on: ubuntu-latest
+    env:
+      KernelSU_Dir: /home/runner/work/KernelSU_Next
+      Setup_Dir: /home/runner/work/Setup_Dir
+      KSU_APK_URL: "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.2.0/KernelSU_Next_v3.2.0_33129-release.apk"
+    steps:
+      - name: Download KernelSU_Next source from official repo
+        run: |
+          mkdir -p "$KernelSU_Dir"
+          git clone https://github.com/KernelSU-Next/KernelSU-Next.git "$KernelSU_Dir"
 
-    - name: Get KernelSU_Next version and id
-      run: |
-        cd "$KernelSU_Dir"
-        echo "kernelsu_id=$(git show -s --format='%h')" >> $GITHUB_ENV
-        git_count=$(git rev-list --count HEAD)
-        kernelsu_version=$(expr 10000 + $git_count + 200)
-        echo "kernelsu_version=$kernelsu_version" >> $GITHUB_ENV
+      - name: Get KernelSU_Next version and id
+        run: |
+          cd "$KernelSU_Dir"
+          echo "kernelsu_id=$(git show -s --format='%h')" >> $GITHUB_ENV
+          git_count=$(git rev-list --count HEAD)
+          kernelsu_version=$(expr 10000 + $git_count + 200)
+          echo "kernelsu_version=$kernelsu_version" >> $GITHUB_ENV
 
-    - name: Download Patch from 'SoDebug/KernelSU' (setup branch)
-      run: |
-        mkdir -p "$Setup_Dir"
-        git clone -b setup https://github.com/SoDebug/KernelSU.git "$Setup_Dir"
+      - name: Download Patch from 'SoDebug/KernelSU' (setup branch)
+        run: |
+          mkdir -p "$Setup_Dir"
+          git clone -b setup https://github.com/SoDebug/KernelSU.git "$Setup_Dir"
 
-    - name: Get Patch commit id
-      run: |
-        cd "$Setup_Dir"
-        echo "patch_id=$(git show -s --format='%h')" >> $GITHUB_ENV
+      - name: Get Patch commit id
+        run: |
+          cd "$Setup_Dir"
+          echo "patch_id=$(git show -s --format='%h')" >> $GITHUB_ENV
 
-    - name: Prepare KernelSU patch archive
-      run: |
-        cp "$Setup_Dir/setup.sh" "$KernelSU_Dir/kernel/setup.sh"
-        cd "$KernelSU_Dir"
-        echo "${{ env.kernelsu_id }}" > kernelsu_id.txt
-        echo "${{ env.kernelsu_version }}" > kernelsu_version.txt
-        tar -czf "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" --exclude='.git' .
-        mv "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" .
+      - name: Prepare KernelSU patch archive
+        run: |
+          cp "$Setup_Dir/setup.sh" "$KernelSU_Dir/kernel/setup.sh"
+          cd "$KernelSU_Dir"
+          echo "${{ env.kernelsu_id }}" > kernelsu_id.txt
+          echo "${{ env.kernelsu_version }}" > kernelsu_version.txt
+          tar -czf "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" --exclude='.git' .
+          mv "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" .
 
-    - name: Upload KernelSU Patch Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: KernelSU_Patched
-        path: ${{ env.KernelSU_Dir }}/KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz
-        retention-days: 5
+      - name: Upload KernelSU Patch Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KernelSU_Patched
+          path: ${{ env.KernelSU_Dir }}/KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz
+          retention-days: 5
 
-    - name: Download KernelSU_Next Manager APK
-      run: |
-        mkdir -p apk_upload
-        cd apk_upload
-        wget -q "${{ env.KSU_APK_URL }}" -O KernelSU_Next_v3.2.0.apk
-        echo "APK downloaded: $(ls -lh)"
+      - name: Download KernelSU_Next Manager APK
+        run: |
+          mkdir -p apk_upload
+          cd apk_upload
+          wget -q "${{ env.KSU_APK_URL }}" -O KernelSU_Next_v3.2.0.apk
+          echo "APK downloaded: $(ls -lh)"
 
-    - name: Upload KernelSU_Next Manager APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: KernelSU_Next_Manager
-        path: apk_upload/*.apk
-        retention-days: 5
+      - name: Upload KernelSU_Next Manager APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: KernelSU_Next_Manager
+          path: apk_upload/*.apk
+          retention-days: 5
 
   Collect_Config_Complie:
     needs: Patch_KernelSU
@@ -94,8 +94,8 @@ jobs:
     env:
       CheckOut_DIR: /home/runner/work/kernel_xiaomi_raphael
       AnyKernel: /home/runner/work/AnyKernel
-      test_patch: false
       CLANG_DIR: /home/runner/r547379
+      test_patch: false
     steps:
       - name: Set build timestamp
         run: echo "time=$(date +'%Y-%m-%d_%H-%M-%S')" >> $GITHUB_ENV
@@ -369,7 +369,7 @@ jobs:
           echo "=== Listing all .ko modules built ==="
           find out -name "*.ko" | head -20
 
-      - name: Build USB/IP kernel modules (separate for clarity)
+      - name: Build USB/IP kernel modules
         if: ${{ env.test_patch != 'true' }}
         run: |
           cd "${{ env.CheckOut_DIR }}"

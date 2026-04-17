@@ -19,10 +19,13 @@ jobs:
           mkdir -p "$KernelSU_Dir"
           git clone https://github.com/SoDebug/KernelSU.git "$KernelSU_Dir"
 
-      - name: Get KernelSU commit id
+      - name: Get KernelSU version and id
         run: |
           cd "$KernelSU_Dir"
-          echo "kernelsu_id=$(git show -s --date=short --format='%h')" >> $GITHUB_ENV
+          echo "kernelsu_id=$(git show -s --format='%h')" >> $GITHUB_ENV
+          git_count=$(git rev-list --count HEAD)
+          kernelsu_version=$(expr 10000 + $git_count + 200)
+          echo "kernelsu_version=$kernelsu_version" >> $GITHUB_ENV
 
       - name: Download Patch from 'SoDebug/KernelSU' (setup branch)
         run: |
@@ -32,18 +35,19 @@ jobs:
       - name: Get Patch commit id
         run: |
           cd "$Setup_Dir"
-          echo "patch_id=$(git show -s --date=short --format='%h')" >> $GITHUB_ENV
+          echo "patch_id=$(git show -s --format='%h')" >> $GITHUB_ENV
 
-      - name: Prepare KernelSU patch archive (NO EXECUTION)
+      - name: Prepare KernelSU patch archive
         run: |
           cp "$Setup_Dir/setup.sh" "$KernelSU_Dir/kernel/setup.sh"
-          TEMP_DIR=$(mktemp -d)
-          cp -a "$KernelSU_Dir"/. "$TEMP_DIR/KernelSU"
-          cd "$TEMP_DIR"
-          tar -czf "KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" --exclude='.git' "KernelSU"
-          mv "KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" "$KernelSU_Dir/"
-          cd /
-          rm -rf "$TEMP_DIR"
+          cd "$KernelSU_Dir"
+          # 保存版本信息到文件，便于后续解压后读取
+          echo "${{ env.kernelsu_id }}" > kernelsu_id.txt
+          echo "${{ env.kernelsu_version }}" > kernelsu_version.txt
+          # 打包，排除 .git 减小体积，并将输出文件放在父目录避免自包含错误
+          tar -czf "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" --exclude='.git' .
+          # 移回当前目录以便上传
+          mv "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" .
 
       - name: Upload KernelSU Patch Artifact
         uses: actions/upload-artifact@v4
@@ -112,11 +116,10 @@ jobs:
         run: |
           cd "${{ env.CheckOut_DIR }}/KernelSU"
           tar -xzf KernelSU_*_Patched_*.tar.gz
-          echo "kernelsu_id=$(git show -s --date=short --format='%h')" >> $GITHUB_ENV
-          git_count=$(git rev-list --count HEAD)
-          kernelsu_version=$(expr 10000 + $git_count + 200)
-          echo "kernelsu_version=$kernelsu_version" >> $GITHUB_ENV
-          rm KernelSU_*_Patched_*.tar.gz
+          # 从文件读取版本信息
+          echo "kernelsu_id=$(cat kernelsu_id.txt)" >> $GITHUB_ENV
+          echo "kernelsu_version=$(cat kernelsu_version.txt)" >> $GITHUB_ENV
+          rm KernelSU_*_Patched_*.tar.gz kernelsu_id.txt kernelsu_version.txt
           cd "${{ env.CheckOut_DIR }}"
           rm -rf drivers/staging/kernelsu
           sh KernelSU/kernel/setup.sh

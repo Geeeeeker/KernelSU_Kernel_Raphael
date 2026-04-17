@@ -41,10 +41,8 @@ jobs:
         run: |
           cp "$Setup_Dir/setup.sh" "$KernelSU_Dir/kernel/setup.sh"
           cd "$KernelSU_Dir"
-          # 保存版本信息到文件
           echo "${{ env.kernelsu_id }}" > kernelsu_id.txt
           echo "${{ env.kernelsu_version }}" > kernelsu_version.txt
-          # 打包到父目录避免自包含
           tar -czf "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" --exclude='.git' .
           mv "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" .
 
@@ -119,8 +117,16 @@ jobs:
           echo "kernelsu_version=$(cat kernelsu_version.txt)" >> $GITHUB_ENV
           rm KernelSU_*_Patched_*.tar.gz kernelsu_id.txt kernelsu_version.txt
           cd "${{ env.CheckOut_DIR }}"
+          # 清理旧目录并执行官方整合脚本
           rm -rf drivers/staging/kernelsu
           sh KernelSU/kernel/setup.sh
+          # 若 setup.sh 未正确生成 Makefile，手动补救
+          if [ ! -f drivers/staging/kernelsu/Makefile ]; then
+            echo "Makefile missing, creating manually"
+            mkdir -p drivers/staging/kernelsu
+            ln -sf ../../../KernelSU/kernel drivers/staging/kernelsu/KernelSU
+            cp KernelSU/kernel/Makefile drivers/staging/kernelsu/Makefile
+          fi
 
       - name: Prepare Toolchains
         if: ${{ env.test_patch != 'true' }}
@@ -130,27 +136,21 @@ jobs:
           tar -xzf /tmp/clang.tar.gz -C ~/clang
           rm /tmp/clang.tar.gz
 
-          # 显示 clang 目录结构以确认 bin 路径
-          ls -la ~/clang
-          ls -la ~/clang/bin || true
-
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/aarch64-linux-android-4.9
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/arm-linux-androideabi-4.9
+
           git clone https://github.com/SoDebug/AnyKernel.git "${{ env.AnyKernel }}"
 
       - name: Compile Kernel
         if: ${{ env.test_patch != 'true' }}
         run: |
-          # 根据解压后的实际目录设置 CLANG 路径
-          # 如果 bin 直接在 ~/clang 下，则 CLANG=~/clang/bin
-          # 否则按常规 clang-r547379 目录
+          # 自适应 Clang 路径
           if [ -d ~/clang/clang-r547379/bin ]; then
             CLANG=~/clang/clang-r547379/bin
           else
             CLANG=~/clang/bin
           fi
           echo "Using CLANG: $CLANG"
-          ls -la $CLANG
 
           GCC32=~/arm-linux-androideabi-4.9/bin
           GCC64=~/aarch64-linux-android-4.9/bin
@@ -161,7 +161,6 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
-          # 强制指定 LLVM 工具
           export LD=ld.lld
           export AR=llvm-ar
           export NM=llvm-nm
@@ -170,12 +169,15 @@ jobs:
           export STRIP=llvm-strip
           export CC="ccache clang"
 
-          # 禁用将某些 C99 特性视为错误的警告
+          # 忽略部分警告错误
           export KCFLAGS="-Wno-vla-extension -Wno-error=unused-command-line-argument"
 
           cd "${{ env.CheckOut_DIR }}"
 
           make LLVM=1 LLVM_IAS=1 O=out raphael_defconfig
+          # 确保 KernelSU 相关配置被启用（可选）
+          ./scripts/config --file out/.config --enable KSU || true
+          make LLVM=1 LLVM_IAS=1 O=out olddefconfig
           make LLVM=1 LLVM_IAS=1 O=out -j$(nproc)
 
       - name: Package Kernel

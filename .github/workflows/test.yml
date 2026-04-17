@@ -8,55 +8,7 @@ on:
       - "main"
 
 jobs:
-  Patch_KernelSU:
-    runs-on: ubuntu-latest
-    env:
-      KernelSU_Dir: /home/runner/work/KernelSU
-      Setup_Dir: /home/runner/work/Setup_Dir
-    steps:
-      - name: Download KernelSU from 'SoDebug/KernelSU'
-        run: |
-          mkdir -p "$KernelSU_Dir"
-          git clone https://github.com/SoDebug/KernelSU.git "$KernelSU_Dir"
-      - name: Get KernelSU version and id
-        run: |
-          cd "$KernelSU_Dir"
-          echo "kernelsu_id=$(git show -s --format='%h')" >> $GITHUB_ENV
-          git_count=$(git rev-list --count HEAD)
-          kernelsu_version=$(expr 10000 + $git_count + 200)
-          echo "kernelsu_version=$kernelsu_version" >> $GITHUB_ENV
-      - name: Download Patch from 'SoDebug/KernelSU' (setup branch)
-        run: |
-          mkdir -p "$Setup_Dir"
-          git clone -b setup https://github.com/SoDebug/KernelSU.git "$Setup_Dir"
-      - name: Get Patch commit id
-        run: |
-          cd "$Setup_Dir"
-          echo "patch_id=$(git show -s --format='%h')" >> $GITHUB_ENV
-      - name: Prepare KernelSU patch archive
-        run: |
-          cp "$Setup_Dir/setup.sh" "$KernelSU_Dir/kernel/setup.sh"
-          cd "$KernelSU_Dir"
-          echo "${{ env.kernelsu_id }}" > kernelsu_id.txt
-          echo "${{ env.kernelsu_version }}" > kernelsu_version.txt
-          tar -czf "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" --exclude='.git' .
-          mv "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" .
-      - name: Upload KernelSU Patch Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: KernelSU_Patched
-          path: ${{ env.KernelSU_Dir }}/KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz
-          retention-days: 5
-
-      - name: Upload KernelSU Manager APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: KernelSU_Manager
-          path: ${{ env.Setup_Dir }}/*.apk
-          retention-days: 5
-
   Collect_Config_Complie:
-    needs: Patch_KernelSU
     runs-on: ubuntu-latest
     steps:
       - name: Collecting config
@@ -66,7 +18,6 @@ jobs:
         run: exit 1
 
   Collect_Config_Release:
-    needs: Patch_KernelSU
     runs-on: ubuntu-latest
     steps:
       - name: Collecting config
@@ -103,36 +54,10 @@ jobs:
             kernel-usbip-build
           max-size: '10G'
 
-      - name: Clone Kernel Source (Android 16.0)
+      - name: Clone Kernel Source (Android 16.0 with SUSFS)
         if: ${{ env.test_patch != 'true' }}
         run: |
           git clone -b 16.0-susfs https://github.com/Geeeeeker/kernel_xiaomi_raphael-pixel.git "$CheckOut_DIR"
-
-      - name: Download KernelSU_Patched Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: KernelSU_Patched
-          path: ${{ env.CheckOut_DIR }}/KernelSU
-
-      - name: Integrate KernelSU into Kernel Source (Manual method)
-        run: |
-          cd "${{ env.CheckOut_DIR }}/KernelSU"
-          tar -xzf KernelSU_*_Patched_*.tar.gz
-          echo "kernelsu_id=$(cat kernelsu_id.txt)" >> $GITHUB_ENV
-          echo "kernelsu_version=$(cat kernelsu_version.txt)" >> $GITHUB_ENV
-          rm KernelSU_*_Patched_*.tar.gz kernelsu_id.txt kernelsu_version.txt
-          
-          cd "${{ env.CheckOut_DIR }}"
-          rm -rf drivers/staging/kernelsu
-          mkdir -p drivers/staging/kernelsu
-          ln -sf ../../../KernelSU/kernel drivers/staging/kernelsu/KernelSU
-          cp KernelSU/kernel/Makefile drivers/staging/kernelsu/Makefile
-          cp KernelSU/kernel/Kconfig drivers/staging/kernelsu/Kconfig
-          if ! grep -q "source \"drivers/staging/kernelsu/Kconfig\"" drivers/Kconfig; then
-            echo 'source "drivers/staging/kernelsu/Kconfig"' >> drivers/Kconfig
-          fi
-          echo "KernelSU integration check:"
-          ls -la drivers/staging/kernelsu/
 
       # ================ 添加 rtl8188eus 驱动源码 ================
       - name: Integrate rtl8188eus WiFi driver source
@@ -194,7 +119,7 @@ jobs:
           make LLVM=1 LLVM_IAS=1 O=out raphael_defconfig
           ./scripts/config --file out/.config --enable KSU
           ./scripts/config --file out/.config --disable DEBUG_INFO
-          # 关键修复：允许 Section mismatch 警告而不中止编译
+          # 允许 Section mismatch 警告而不中止编译
           ./scripts/config --file out/.config --enable SECTION_MISMATCH_WARN_ONLY
           make LLVM=1 LLVM_IAS=1 O=out olddefconfig
           make LLVM=1 LLVM_IAS=1 O=out -j$(nproc)
@@ -271,14 +196,18 @@ jobs:
           cp -v ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/Image.gz-dtb "${{ env.AnyKernel }}"/
           cp -v ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/dtbo.img "${{ env.AnyKernel }}"/o
           cd "${{ env.AnyKernel }}"
-          7z a -mx9 "Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_16.zip" *
+          # 获取 KernelSU 版本信息（从内核源码中提取）
+          KSU_VERSION=$(grep -oP '(?<=KSU_VERSION=)\d+' ${{ env.CheckOut_DIR }}/out/include/generated/autoconf.h || echo "0")
+          KSU_GIT_COUNT=$(cd ${{ env.CheckOut_DIR }}/drivers/staging/kernelsu && git rev-list --count HEAD 2>/dev/null || echo "0")
+          KSU_SHORT_HASH=$(cd ${{ env.CheckOut_DIR }}/drivers/staging/kernelsu && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+          7z a -mx9 "Raphael-Kernel_KSU_${KSU_VERSION}_${KSU_GIT_COUNT}_${KSU_SHORT_HASH}_SOVIET-ANDROID_16.zip" *
       
       - name: Upload Kernel Package
         if: ${{ env.test_patch != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: Raphael-Kernel_KSU_Dev_SOVIET-ANDROID_16
-          path: ${{ env.AnyKernel }}/Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_16.zip
+          path: ${{ env.AnyKernel }}/Raphael-Kernel_*.zip
 
       - name: Upload USB/IP Android Binaries
         if: ${{ env.test_patch != 'true' }}
@@ -307,13 +236,12 @@ jobs:
           Device Code: raphael
           Device Name：Redmi K20 Pro | Mi 9T Pro
           Support Android：16.0
-          KernelSU Git Version：***
-          KernelSU Version: *****
-          Patch ID: *******
-          KernelSU ID: *******
+          KernelSU Version: built-in with SUSFS
+          SUSFS Version: see kernel logs
           Tested: undefined
           Build Date: $(date +'%Y/%m/%d')
           EOF
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -328,7 +256,5 @@ jobs:
           name: ${{ steps.tag.outputs.release_tag }} Kernel for Raphael
           body_path: release.txt
           files: |
-            ${{ env.Release_DIR }}/KernelSU_Patched/*.tar.gz
-            ${{ env.Release_DIR }}/KernelSU_Manager/*.apk
             ${{ env.Release_DIR }}/Raphael-Kernel_KSU_Dev_SOVIET-ANDROID_16/*.zip
             ${{ env.Release_DIR }}/USBIP_Android_Binaries/*

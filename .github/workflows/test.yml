@@ -19,7 +19,6 @@ jobs:
         run: |
           mkdir -p "$KernelSU_Dir"
           git clone https://github.com/KernelSU-Next/KernelSU-Next.git "$KernelSU_Dir"
-
       - name: Get KernelSU_Next version and id
         run: |
           cd "$KernelSU_Dir"
@@ -27,17 +26,14 @@ jobs:
           git_count=$(git rev-list --count HEAD)
           kernelsu_version=$(expr 10000 + $git_count + 200)
           echo "kernelsu_version=$kernelsu_version" >> $GITHUB_ENV
-
       - name: Download Patch from 'SoDebug/KernelSU' (setup branch)
         run: |
           mkdir -p "$Setup_Dir"
           git clone -b setup https://github.com/SoDebug/KernelSU.git "$Setup_Dir"
-
       - name: Get Patch commit id
         run: |
           cd "$Setup_Dir"
           echo "patch_id=$(git show -s --format='%h')" >> $GITHUB_ENV
-
       - name: Prepare KernelSU patch archive
         run: |
           cp "$Setup_Dir/setup.sh" "$KernelSU_Dir/kernel/setup.sh"
@@ -46,7 +42,6 @@ jobs:
           echo "${{ env.kernelsu_version }}" > kernelsu_version.txt
           tar -czf "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" --exclude='.git' .
           mv "../KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" .
-
       - name: Upload KernelSU Patch Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -60,7 +55,6 @@ jobs:
           cd apk_upload
           wget -q "${{ env.KSU_APK_URL }}" -O KernelSU_Next_v3.2.0.apk
           echo "APK downloaded: $(ls -lh)"
-
       - name: Upload KernelSU_Next Manager APK
         uses: actions/upload-artifact@v4
         with:
@@ -107,7 +101,6 @@ jobs:
           sudo apt-get install -y zip flex bison libncurses-dev gawk libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache qemu-user-static binfmt-support libelf-dev
           sudo apt clean
           docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
-
       - name: Setup ccache
         if: ${{ env.test_patch != 'true' }}
         uses: hendrikmuhs/ccache-action@v1.2
@@ -130,7 +123,6 @@ jobs:
         if: ${{ env.test_patch != 'true' }}
         run: |
           git clone -b 16.0 https://github.com/SOVIET-ANDROID/kernel_xiaomi_raphael.git "$CheckOut_DIR"
-
       - name: Download KernelSU_Patched Artifact
         uses: actions/download-artifact@v4
         with:
@@ -159,7 +151,6 @@ jobs:
           
           echo "KernelSU integration check:"
           ls -la drivers/staging/kernelsu/
-
       - name: Add rtl8188eus WiFi driver
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -175,7 +166,6 @@ jobs:
             exit 1
           fi
           rm -rf rtl8188eus-repo
-
       - name: Prepare Toolchains
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -185,12 +175,9 @@ jobs:
             tar -xzf /tmp/clang.tar.gz -C "${{ env.CLANG_DIR }}"
             rm /tmp/clang.tar.gz
           fi
-
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/aarch64-linux-android-4.9
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/arm-linux-androideabi-4.9
-
           git clone https://github.com/SoDebug/AnyKernel.git "${{ env.AnyKernel }}"
-
       - name: Configure kernel and apply source fixes
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -275,7 +262,8 @@ jobs:
           echo "CONFIG_POSIX_MQUEUE=y" >> $DEFCONFIG
           echo "CONFIG_CGROUP_PIDS=y" >> $DEFCONFIG
           echo "CONFIG_BLK_DEV_THROTTLING=y" >> $DEFCONFIG
-          echo "CONFIG_CGROUP_PERF=yCONFIG_VXLAN" >> $DEFCONFIG
+          echo "CONFIG_CGROUP_PERF=y" >> $DEFCONFIG
+          echo "CONFIG_VXLAN=y" >> $DEFCONFIG
           echo "CONFIG_CGROUP_HUGETLB=y" >> $DEFCONFIG
           echo "CONFIG_NET_CLS_CGROUP=y" >> $DEFCONFIG
           echo "CONFIG_CGROUP_NET_PRIO=y" >> $DEFCONFIG
@@ -286,8 +274,10 @@ jobs:
           echo "CONFIG_IP_VS_RR=y" >> $DEFCONFIG
           echo "CONFIG_SECURITY_APPARMOR=y" >> $DEFCONFIG
           
-          echo "CONFIG_LOCALVERSION="-Geeeeeker-perf"
-          echo "CONFIG_DOCKER=y" >> $DEFCONFIG
+          # 【修复1】正确引用带双引号的字符串
+          echo 'CONFIG_LOCALVERSION="-Geeeeeker-perf"' >> $DEFCONFIG
+          
+          # 禁用部分 Docker 相关统计/带宽控制（按需）
           echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
           echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
           sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' $DEFCONFIG
@@ -300,7 +290,6 @@ jobs:
           sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
           sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
           
-
       - name: Compile Kernel (with full configuration)
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -330,7 +319,6 @@ jobs:
           make LLVM=1 LLVM_IAS=1 O=out -j$(nproc)
           
           ccache --show-stats
-
       - name: Check rtl8188 compilation status
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -341,7 +329,6 @@ jobs:
           find out -name "*8188*.o" | head -10
           echo "=== Listing all .ko modules built ==="
           find out -name "*.ko" | head -20
-
       - name: Build USB/IP kernel modules
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -363,7 +350,6 @@ jobs:
           
           mkdir -p $GITHUB_WORKSPACE/usbip-out/modules
           cp out/drivers/usb/usbip/*.ko $GITHUB_WORKSPACE/usbip-out/modules/
-
       - name: Build USB/IP userspace tools (Docker arm64)
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -430,7 +416,6 @@ jobs:
               fi
               echo \"USB/IP user-space tools build complete.\"
             "
-
       - name: Package USB/IP artifacts
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -438,7 +423,6 @@ jobs:
           cd usbip-out
           tar czf ../usbip-arm64-bundle.tar.gz .
           cd ..
-
       - name: Upload USB/IP bundle
         if: ${{ env.test_patch != 'true' }}
         uses: actions/upload-artifact@v4
@@ -464,7 +448,6 @@ jobs:
           cd $GITHUB_WORKSPACE/rtl8188-module
           tar czf ../rtl8188-module.tar.gz rtl8188.ko
           cd $GITHUB_WORKSPACE
-
       - name: Upload rtl8188 Module Artifact
         if: ${{ env.test_patch != 'true' }}
         uses: actions/upload-artifact@v4
@@ -479,7 +462,6 @@ jobs:
           cp -v ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/dtbo.img "${{ env.AnyKernel }}"/o
           cd "${{ env.AnyKernel }}"
           7z a -mx9 "Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_16.zip" *
-
       - name: Upload Kernel Package
         if: ${{ env.test_patch != 'true' }}
         uses: actions/upload-artifact@v4
@@ -516,7 +498,6 @@ jobs:
           - Binder (binderfs)
           Build Date：$(date +'%Y/%m/%d')
           EOF
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:

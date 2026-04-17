@@ -65,22 +65,12 @@ jobs:
         if: ${{ env.Debug == 'true' }}
         run: exit 1
 
-  Collect_Config_Release:
-    needs: Patch_KernelSU
-    runs-on: ubuntu-latest
-    steps:
-      - name: Collecting config
-        run: echo "ALLOW_RELEASE=${{ secrets.ALLOW_RELEASE }}" >> $GITHUB_ENV
-      - name: Setting Job (Allow Release)
-        if: ${{ env.ALLOW_RELEASE == 'false' }}
-        run: exit 1
-
   Compile_SOVIET_ANDROID:
     needs: Collect_Config_Complie
     runs-on: ubuntu-latest
     env:
       CheckOut_DIR: /home/runner/work/kernel_xiaomi_raphael
-      AnyKernel: /home/runner/work/AnyKernel
+      AnyKernel: /home/runner/work/AnyKernel3
       test_patch: false
       KBUILD_BUILD_USER: NATO66613
       KBUILD_BUILD_HOST: KREMLIN
@@ -156,7 +146,7 @@ jobs:
           rm -rf rtl8188eus-repo
           echo "rtl8188eus driver source integrated."
 
-      # ========== 核心修复：将完整配置写入 defconfig 文件 ==========
+      # ========== 将 rtl8188eus 和 USB/IP 内核部分改为内建 (y) ==========
       - name: 配置内核基础参数（写入 defconfig）
         run: |
           DEFCONFIG="${{ env.CheckOut_DIR }}/arch/arm64/configs/raphael_defconfig"
@@ -184,6 +174,7 @@ jobs:
           echo "CONFIG_TMPFS=y" >> $DEFCONFIG
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> $DEFCONFIG
           echo "CONFIG_TMPFS_XATTR=y" >> $DEFCONFIG
+          # USB/IP 内核部分改为内建 (y)
           echo "CONFIG_USBIP_CORE=y" >> $DEFCONFIG
           echo "CONFIG_USBIP_VHCI_HCD=y" >> $DEFCONFIG
           echo "CONFIG_USBIP_HOST=y" >> $DEFCONFIG
@@ -196,6 +187,7 @@ jobs:
           echo "CONFIG_CRYPTO_ZSTD=y" >> $DEFCONFIG
           echo "CONFIG_KALLSYMS=y" >> $DEFCONFIG
           echo "CONFIG_KALLSYMS_ALL=y" >> $DEFCONFIG
+          # rtl8188eus 改为内建 (y)
           echo "CONFIG_RTL8188EU=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL_CONSOLE=y" >> $DEFCONFIG
@@ -231,10 +223,6 @@ jobs:
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/aarch64-linux-android-4.9
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/arm-linux-androideabi-4.9
 
-      - name: Clone AnyKernel
-        run: |
-          git clone https://github.com/SoDebug/AnyKernel.git "${{ env.AnyKernel }}"
-
       - name: Compile Kernel
         if: ${{ env.test_patch != 'true' }}
         run: |
@@ -254,31 +242,102 @@ jobs:
           ccache --show-stats
         shell: bash
 
-      - name: 编译 USB/IP 内核模块
-        if: ${{ env.test_patch != 'true' }}
+      # ========== 编译 USB/IP 用户态工具（保留） ==========
+      - name: 设置 QEMU 用户态支持
         run: |
-          export CLANG_PATH=$HOME/r547379/bin
-          export PATH=${CLANG_PATH}:${PATH}
-          cd "${{ env.CheckOut_DIR }}"
-          make -j$(nproc) \
-            ARCH=arm64 \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            O=out \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            M=drivers/usb/usbip \
-            modules
-          mkdir -p $GITHUB_WORKSPACE/usbip-out/modules
-          cp out/drivers/usb/usbip/*.ko $GITHUB_WORKSPACE/usbip-out/modules/
-        shell: bash
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
-      - name: Package Kernel
+      - name: 编译 USB/IP 用户态工具 (Docker 容器)
+        run: |
+          mkdir -p usbip-out/{bin,libs}
+          docker run --rm --platform linux/arm64 \
+            --memory=4g \
+            -v ${{ github.workspace }}:/workspace \
+            -v ${{ github.workspace }}/usbip-out:/output \
+            -w /workspace \
+            arm64v8/ubuntu:22.04 \
+            bash -c "
+              set -e
+              export DEBIAN_FRONTEND=noninteractive
+              ulimit -s unlimited
+              apt update
+              apt install -y \
+                build-essential \
+                autoconf \
+                libtool \
+                pkg-config \
+                libudev-dev \
+                libssl-dev \
+                flex \
+                bison \
+                file \
+                patchelf
+              cd tools/usb/usbip
+              ./autogen.sh
+              ./configure CFLAGS=\"-O0 -Wno-error\" --prefix=/usr
+              make CFLAGS=\"-O0 -Wno-error\" -j1
+              cp src/.libs/usbip /output/bin/
+              cp src/.libs/usbipd /output/bin/
+              cp libsrc/.libs/libusbip.so.0* /output/libs/
+              cd /output
+              BINARIES=\"bin/usbip bin/usbipd libs/libusbip.so.0*\"
+              DEPS=\"\"
+              for file in \$BINARIES; do
+                if [ -f \"\$file\" ]; then
+                  echo \"Collecting dependencies for \$file...\"
+                  needed=\$(readelf -d \"\$file\" | grep NEEDED | awk '{print \$5}' | tr -d '[]' || true)
+                  for lib in \$needed; do
+                    if [[ \"\$DEPS\" != *\"\$lib\"* ]]; then
+                      DEPS=\"\$DEPS \$lib\"
+                    fi
+                  done
+                fi
+              done
+              for lib in \$(echo \$DEPS | tr ' ' '\\n' | sort -u); do
+                echo \"Searching for library: \$lib\"
+                libpath=\$(find /lib /usr/lib -name \"\$lib\" -type f 2>/dev/null | head -1 || true)
+                if [ -n \"\$libpath\" ]; then
+                  echo \"Found: \$libpath\"
+                  cp -P \"\$libpath\" libs/ 2>/dev/null || cp \"\$libpath\" libs/
+                  for reallib in \$(find \"\$(dirname \"\$libpath\")\" -name \"\${lib%.so*}*\" -type f 2>/dev/null); do
+                    cp -n \"\$reallib\" libs/ 2>/dev/null || true
+                  done
+                else
+                  echo \"Warning: library \$lib not found\"
+                fi
+              done
+              ld_linux=\"/lib/ld-linux-aarch64.so.1\"
+              if [ -f \"\$ld_linux\" ]; then
+                cp -P \"\$ld_linux\" libs/
+              fi
+              echo \"USB/IP user-space tools build and collection complete.\"
+            "
+
+      - name: 打包 USB/IP 用户态工具
+        run: |
+          cd usbip-out
+          tar czf ../usbip-arm64-tools.tar.gz .
+          cd ..
+
+      - name: 上传 USB/IP 用户态工具包
+        uses: actions/upload-artifact@v4
+        with:
+          name: usbip-arm64-tools
+          path: usbip-arm64-tools.tar.gz
+
+      # ========== 打包内核刷机包（无模块） ==========
+      - name: Clone AnyKernel3 and Package Kernel
         if: ${{ env.test_patch != 'true' }}
         run: |
-          cp -v ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/Image.gz-dtb "${{ env.AnyKernel }}"/
-          cp -v ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/dtbo.img "${{ env.AnyKernel }}"/o
+          git clone --depth=1 https://github.com/SOVIET-ANDROID/AnyKernel3.git "${{ env.AnyKernel }}"
+          
+          cp -v "${{ env.CheckOut_DIR }}/out/arch/arm64/boot/Image.gz-dtb" "${{ env.AnyKernel }}/"
+          cp -v "${{ env.CheckOut_DIR }}/out/arch/arm64/boot/dtbo.img" "${{ env.AnyKernel }}/"
+          
           cd "${{ env.AnyKernel }}"
-          7z a -mx9 "Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_16.zip" *
+          zip -r9 "Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_16.zip" * -x .git README.md
 
       - name: Upload Kernel Package
         if: ${{ env.test_patch != 'true' }}
@@ -286,56 +345,3 @@ jobs:
         with:
           name: Raphael-Kernel_KSU_Dev_SOVIET-ANDROID_16
           path: ${{ env.AnyKernel }}/Raphael-Kernel_KSU_${{ env.kernelsu_version }}_${{ env.kernelsu_id }}_SOVIET-ANDROID_16.zip
-
-      - name: Upload USB/IP modules
-        if: ${{ env.test_patch != 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: usbip-modules
-          path: ${{ github.workspace }}/usbip-out/modules/
-
-  Release:
-    needs:
-      - Compile_SOVIET_ANDROID
-      - Collect_Config_Release
-    runs-on: ubuntu-latest
-    env:
-      Release_DIR: /home/runner/work/release
-    steps:
-      - name: Set current time
-        run: echo "time=$(date +'%Y-%m-%d_%H-%M-%S')" >> "$GITHUB_OUTPUT"
-
-      - name: Generate release tag and notes
-        run: |
-          echo "release_tag=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
-          cat > release.txt <<EOF
-          SoDebug Kernel Config：
-          Device Code: raphael
-          Device Name：Redmi K20 Pro | Mi 9T Pro
-          Support Android：16.0
-          KernelSU Git Version：***
-          KernelSU Version: *****
-          Patch ID: *******
-          KernelSU ID: *******
-          Tested: undefined
-          Build Date: $(date +'%Y/%m/%d')
-          EOF
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ${{ env.Release_DIR }}
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: v.${{ steps.tag.outputs.release_tag }}
-          name: ${{ steps.tag.outputs.release_tag }} Kernel for Raphael
-          body_path: release.txt
-          files: |
-            ${{ env.Release_DIR }}/KernelSU_Patched/*.tar.gz
-            ${{ env.Release_DIR }}/KernelSU_Manager/*.apk
-            ${{ env.Release_DIR }}/Raphael-Kernel_KSU_Dev_SOVIET-ANDROID_16/*.zip
-            ${{ env.Release_DIR }}/usbip-modules/*.ko

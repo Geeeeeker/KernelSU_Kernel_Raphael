@@ -1,22 +1,33 @@
-name: Kernel CI
+name: Continues testing
+
 on:
-  repository_dispatch:
-  workflow_dispatch:
   push:
-    branches:
-      - "main"
+    branches: [ "**" ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ "**" ]
 
 jobs:
-  Patch_KernelSU:
+  build:
     runs-on: ubuntu-latest
     env:
+      KBUILD_BUILD_USER: NATO66613
+      KBUILD_BUILD_HOST: KREMLIN
       KernelSU_Dir: /home/runner/work/KernelSU
       Setup_Dir: /home/runner/work/Setup_Dir
+
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ================= 集成 KernelSU（方式同 main.yml）=================
       - name: Download KernelSU from 'SoDebug/KernelSU'
         id: get-kernelsu
         run: |
-          mkdir $KernelSU_Dir
+          mkdir -p $KernelSU_Dir
           git clone https://github.com/SoDebug/KernelSU.git $KernelSU_Dir
 
       - name: Get KernelSU id
@@ -25,10 +36,10 @@ jobs:
           cd $KernelSU_Dir
           echo "kernelsu_id=$(git show -s --date=short --format="%h")" >> $GITHUB_ENV
 
-      - name: Download Patch form 'SoDebug/KernelSU'
+      - name: Download Patch from 'SoDebug/KernelSU'
         id: get-patch
         run: |
-          mkdir $Setup_Dir
+          mkdir -p $Setup_Dir
           git clone -b setup https://github.com/SoDebug/KernelSU.git $Setup_Dir
 
       - name: Get Patch id
@@ -37,131 +48,22 @@ jobs:
           cd $Setup_Dir
           echo "patch_id=$(git show -s --date=short --format="%h")" >> $GITHUB_ENV
 
-      - name: Patch Kernel
+      - name: Integrate KernelSU into kernel source
         run: |
           cp $Setup_Dir/setup.sh $KernelSU_Dir/kernel/setup.sh
-          cd $KernelSU_Dir
-          tar czf "KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz" .[!.]* *
+          # 将 KernelSU 源码复制到当前内核树中（替换原有方式）
+          rm -rf $GITHUB_WORKSPACE/KernelSU
+          cp -r $KernelSU_Dir $GITHUB_WORKSPACE/KernelSU
+          cd $GITHUB_WORKSPACE
+          # 执行 KernelSU 集成脚本
+          sh KernelSU/kernel/setup.sh
 
-      - name: Upload KernelSU Patch
-        uses: actions/upload-artifact@v4
-        with:
-          name: KernelSU_Patched
-          path: ${{ env.KernelSU_Dir }}/KernelSU_${{ env.kernelsu_id }}_Patched_${{ env.patch_id }}.tar.gz
-          retention-days: 5
-
-      - name: Upload KernelSU Manager Package
-        uses: actions/upload-artifact@v4
-        with:
-          name: KernelSU_Manager
-          path: ${{ env.Setup_Dir }}/*.apk
-          retention-days: 5
-
-  Collect_Config_Complie:
-    needs: Patch_KernelSU
-    runs-on: ubuntu-latest
-    steps:
-      - name: Collecting config
-        id: collect_config
-        run: |
-          echo "Debug=${{ secrets.Debug }}" >> $GITHUB_ENV
-
-      - name: Setting Job
-        id: set_job
-        if: ${{ env.Debug == 'true' }}
-        run: exit 1
-
-  Collect_Config_Release:
-    needs: Patch_KernelSU
-    runs-on: ubuntu-latest
-    steps:
-      - name: Collecting config
-        id: collect_config
-        run: |
-          echo "ALLOW_RELEASE=${{ secrets.ALLOW_RELEASE }}" >> $GITHUB_ENV
-
-      - name: Setting Job
-        id: set_job
-        if: ${{ env.ALLOW_RELEASE == 'false' }}
-        run: exit 1
-
-  Compile_Raphael_Android16:
-    needs: Collect_Config_Complie
-    runs-on: ubuntu-latest
-    env:
-      CheckOut_DIR: /home/runner/work/kernel_xiaomi_raphael-pixel
-      AnyKernel: /home/runner/work/AnyKernel
-      KBUILD_BUILD_USER: NATO66613
-      KBUILD_BUILD_HOST: KREMLIN
-    steps:
-      - name: Set current time
-        id: set_time
-        run: echo "time=$(date +'%Y-%m-%d_%H-%M-%S')" >> $GITHUB_ENV
-
-      - name: Installing Dependencies
-        run: |
-          sudo apt update -y
-          sudo apt-get install -y zip flex bison libncurses-dev gawk libiberty-dev autoconf kmod bc build-essential gcc libc6 curl libstdc++6 git wget libssl-dev cpio p7zip-full ccache qemu-user-static binfmt-support lld
-          sudo apt clean
-
-      - name: Setup QEMU user mode
-        run: |
-          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
-
-      - name: Set up ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          create-symlink: true
-          key: kernel-build-cache-raphael16-v2
-          restore-keys: |
-            kernel-build-cache-raphael16
-          max-size: '10G'
-
-      - name: Restore Clang toolchain cache (Android 16)
-        id: restore-clang
-        uses: actions/cache/restore@v4
-        with:
-          path: /home/runner/clang
-          key: clang-r547379-android16
-
-      - name: Clone Kernel Tree (Geeeeeker/raphael-pixel 16.0-susfs)
-        run: |
-          git clone https://github.com/Geeeeeker/kernel_xiaomi_raphael-pixel -b 16.0-susfs $CheckOut_DIR
-
-      - name: Download KernelSU_Patched
-        uses: actions/download-artifact@v4
-        with:
-          name: KernelSU_Patched
-          path: ${{ env.CheckOut_DIR }}/KernelSU_Patch
-
-      - name: Integrate KernelSU (if not already present)
-        run: |
-          cd ${{ env.CheckOut_DIR }}
-          # 检查内核是否已经集成 KernelSU
-          if [ -d "drivers/staging/kernelsu" ]; then
-            echo "KernelSU already integrated in kernel source, skipping setup.sh"
-          else
-            echo "Integrating KernelSU..."
-            cd KernelSU_Patch
-            tar -xzf KernelSU_*_Patched_*.tar.gz
-            cd ..
-            mkdir -p drivers/staging
-            cp -r KernelSU_Patch/kernel drivers/staging/kernelsu
-            # 应用 setup.sh 补丁（仅当需要时）
-            # sh KernelSU_Patch/kernel/setup.sh
-          fi
-          # 提取版本信息
-          cd ${{ env.CheckOut_DIR }}/KernelSU_Patch
-          echo "kernelsu_id=$(git show -s --date=short --format="%h")" >> $GITHUB_ENV
-          git_count=$(git rev-list --count HEAD)
-          kernelsu_version=$(expr 10000 + $git_count + 200)
-          echo "kernelsu_version=$kernelsu_version" >> $GITHUB_ENV
-
+      # ================= 添加 rtl8188eus 驱动（路径已修正为 raphael）=================
       - name: Add rtl8188eus WiFi driver
         run: |
-          cd ${{ env.CheckOut_DIR }}
           export GIT_ASKPASS=echo
-          git clone --depth=1 --branch master https://github.com/Geeeeeker/android_kernel_xiaomi_sdm845.git rtl8188eus-repo
+          # 从 raphael 专用内核仓库获取驱动（原为 sdm845 仓库，现改为 raphael 相关）
+          git clone --depth=1 --branch master https://github.com/Geeeeeker/android_kernel_xiaomi_raphael.git rtl8188eus-repo
           if [ -d "rtl8188eus-repo/drivers/rtl8188eus" ]; then
             cp -r rtl8188eus-repo/drivers/rtl8188eus drivers/
             echo "obj-\$(CONFIG_RTL8188EU) += rtl8188eus/" >> drivers/Makefile
@@ -172,40 +74,52 @@ jobs:
           fi
           rm -rf rtl8188eus-repo
 
-      - name: Download and deploy Clang (Android 16)
+      - name: Setup QEMU user mode
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          create-symlink: true
+          key: kernel-build-cache
+          restore-keys: |
+            kernel-build-cache
+          max-size: '10G'
+
+      - name: Restore toolchain cache
+        id: restore-clang
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/r547379
+          key: clang-r547379
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex libelf-dev libncurses-dev libssl-dev unzip zip wget libarchive-tools
+          ccache --show-stats
+
+      - name: Deploy Clang (if cache miss)
         if: steps.restore-clang.outputs.cache-hit != 'true'
         run: |
-          mkdir -p /home/runner/clang
-          curl -LSs "https://github.com/Geeeeeker/boot/releases/download/clang-prebuilts-20260319-031015/clang-r547379.tar.gz" |
-          tar xz -C /home/runner/clang --strip-components=1
-          # 确保 ld.lld 存在，若没有则创建符号链接或使用系统 lld
-          if [ ! -f "/home/runner/clang/bin/ld.lld" ]; then
-            if [ -f "/home/runner/clang/bin/ld" ]; then
-              ln -s /home/runner/clang/bin/ld /home/runner/clang/bin/ld.lld
-            elif command -v ld.lld >/dev/null 2>&1; then
-              ln -s $(which ld.lld) /home/runner/clang/bin/ld.lld
-            fi
-          fi
+          git clone https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git /home/runner/r547379 --depth=1
 
       - name: Save Clang cache
         if: steps.restore-clang.outputs.cache-hit != 'true'
+        id: cache-clang-save
         uses: actions/cache/save@v4
         with:
-          path: /home/runner/clang
-          key: clang-r547379-android16
+          path: /home/runner/r547379
+          key: clang-r547379
 
       - name: Configure kernel and apply source fixes
         run: |
-          cd ${{ env.CheckOut_DIR }}
           DEFCONFIG="arch/arm64/configs/raphael_defconfig"
-
-          # 确保 defconfig 存在
-          if [ ! -f "$DEFCONFIG" ]; then
-            echo "Error: $DEFCONFIG not found!"
-            exit 1
-          fi
-
-          # 应用 defconfig 修改
+          
+          # ====== 应用 defconfig 修改 ======
           echo "CONFIG_MODULES=y" >> $DEFCONFIG
           echo "CONFIG_KPROBES=y" >> $DEFCONFIG
           echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
@@ -219,7 +133,7 @@ jobs:
           echo "CONFIG_BPF_JIT=y" >> $DEFCONFIG
           echo "# CONFIG_BPF_JIT_ALWAYS_ON is not set" >> $DEFCONFIG
           echo "CONFIG_BPF_SYSCALL=y" >> $DEFCONFIG
-
+          
           echo "CONFIG_SYSVIPC=y" >> $DEFCONFIG
           echo "CONFIG_SYSVIPC_SYSCTL=y" >> $DEFCONFIG
           echo "CONFIG_SYSVIPC_COMPAT=y" >> $DEFCONFIG
@@ -231,19 +145,20 @@ jobs:
           echo "CONFIG_TMPFS=y" >> $DEFCONFIG
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> $DEFCONFIG
           echo "CONFIG_TMPFS_XATTR=y" >> $DEFCONFIG
-
+          
           echo "CONFIG_USBIP_CORE=m" >> $DEFCONFIG
           echo "CONFIG_USBIP_VHCI_HCD=m" >> $DEFCONFIG
           echo "CONFIG_USBIP_HOST=m" >> $DEFCONFIG
-
+          
           echo "CONFIG_SECTION_MISMATCH_WARN_ONLY=y" >> $DEFCONFIG
           echo "CONFIG_BACKLIGHT_CLASS_DEVICE=y" >> $DEFCONFIG
           echo "CONFIG_BACKLIGHT_QCOM=y" >> $DEFCONFIG
           echo "CONFIG_MODVERSIONS=n" >> $DEFCONFIG
-
+          
           echo "CONFIG_ZRAM=y" >> $DEFCONFIG
+          
           echo "CONFIG_RTL8188EU=y" >> $DEFCONFIG
-
+          
           echo "CONFIG_USB_SERIAL=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL_CONSOLE=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL_GENERIC=y" >> $DEFCONFIG
@@ -251,18 +166,17 @@ jobs:
           echo "CONFIG_USB_SERIAL_FTDI_SIO=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL_CP210X=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL_PL2303=y" >> $DEFCONFIG
-
+          
           echo "CONFIG_ANDROID=y" >> $DEFCONFIG
           echo "CONFIG_ANDROID_BINDER_IPC=y" >> $DEFCONFIG
           echo "CONFIG_ANDROID_BINDER_DEVICES=\"binder,hwbinder,vndbinder\"" >> $DEFCONFIG
-
+          
           echo "# CONFIG_TRACING is not set" >> $DEFCONFIG
           echo "# CONFIG_FTRACE is not set" >> $DEFCONFIG
-
-          echo "CONFIG_KSU=y" >> $DEFCONFIG
-          echo "CONFIG_KSU_KPROBE_HOOKS=y" >> $DEFCONFIG
-
-          # 清理 BTRFS/ZSTD 配置
+          
+          # 注意：KernelSU 已通过脚本集成，不再需要手动添加 CONFIG_KSU
+          
+          # ----- 清理可能存在的 BTRFS/ZSTD 配置，避免干扰 -----
           sed -i '/CONFIG_BTRFS_FS/d' $DEFCONFIG
           sed -i '/CONFIG_ZSTD/d' $DEFCONFIG
           sed -i '/CONFIG_CRYPTO_ZSTD/d' $DEFCONFIG
@@ -270,41 +184,42 @@ jobs:
           echo "# CONFIG_BTRFS_FS_ZSTD is not set" >> $DEFCONFIG
           echo "# CONFIG_ZSTD_COMPRESS is not set" >> $DEFCONFIG
           echo "# CONFIG_ZSTD_DECOMPRESS is not set" >> $DEFCONFIG
-
+          
           rm -rf utils
           git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
-
+          
           sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
           sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
           sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
           sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
-
+          sed -i '/select BRIDGE_VLAN_FILTERING/d' utils/Kconfig
+          
           echo 'source "utils/Kconfig"' >> "Kconfig"
           echo "CONFIG_DOCKER=y" >> $DEFCONFIG
-
+          
           echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
           echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
-
+          
           sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' $DEFCONFIG
           echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> $DEFCONFIG
-
+          
           echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
           echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
-
-          # 修复设备树语法错误（如果存在）
-          if [ -f "arch/arm64/boot/dts/qcom/Makefile" ]; then
-            sed -i '/sdm845-v2-qvr-evt.dtb/d' arch/arm64/boot/dts/qcom/Makefile
-            sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
-            sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
-          fi
-
-          # 应用源代码补丁
+          
+          # 修复设备树语法错误（使用 raphael 相关的设备树文件）
+          sed -i '/raphael-v2-qvr-evt.dtb/d' arch/arm64/boot/dts/qcom/Makefile
+          sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
+          sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
+          
+          # ====== 应用源代码补丁 ======
           echo "Applying source fixes for old kernel..."
-
+          
+          # 1. 修复 vm_fault_t 未定义问题
           if ! grep -q "typedef.*vm_fault_t" include/linux/mm_types.h; then
               sed -i '/#include <linux\/mm_types_task.h>/i typedef int vm_fault_t;' include/linux/mm_types.h
           fi
-
+          
+          # 2. 删除重复的 kvcalloc 定义（保留第一个）
           awk '
           BEGIN { count=0; skip=0 }
           /^static inline void \*kvcalloc/ {
@@ -317,7 +232,8 @@ jobs:
           }
           !skip
           ' include/linux/mm.h > mm.h.tmp && mv mm.h.tmp include/linux/mm.h
-
+          
+          # 3. 应用 runc 和 qtaguid 补丁
           chmod +x utils/runcpatch.sh
           if [ -f kernel/cgroup/cgroup.c ]; then
               sh utils/runcpatch.sh kernel/cgroup/cgroup.c
@@ -328,40 +244,40 @@ jobs:
           if [ -f net/netfilter/xt_qtaguid.c ]; then
               patch -p0 < utils/xt_qtaguid.patch || true
           fi
-
+          
+          # 4. 修复 cfq-iosched.c 宏中的 break 错误
           CFQ_FILE="block/cfq-iosched.c"
           if [ -f "$CFQ_FILE" ]; then
               sed -i '/^#define cfq_log_cfqq/,/while (0)/ { /break;/d; }' "$CFQ_FILE"
               echo "Fixed cfq_log_cfqq macro in $CFQ_FILE"
           fi
+        shell: bash
 
       - name: Build the kernel with ccache
         run: |
-          export CLANG_PATH=/home/runner/clang/bin
+          export CLANG_PATH=$HOME/r547379/bin
           export PATH=${CLANG_PATH}:${PATH}
-          export LD=ld.lld
-
-          cd ${{ env.CheckOut_DIR }}
-          make LLVM=1 LLVM_IAS=1 CC="ccache clang" LD=ld.lld raphael_defconfig O=out
-
+          
+          make LLVM=1 LLVM_IAS=1 CC="ccache clang" raphael_defconfig O=out
+          
+          # 强制禁用 Btrfs 及依赖的 XOR/RAID6 功能，避免 neon 头文件缺失错误
           cd out
           sed -i 's/^CONFIG_BTRFS_FS=[ym]$/# CONFIG_BTRFS_FS is not set/' .config
           sed -i 's/^CONFIG_BTRFS_FS_ZSTD=[ym]$/# CONFIG_BTRFS_FS_ZSTD is not set/' .config
           sed -i 's/^CONFIG_XOR_BLOCKS=[ym]$/# CONFIG_XOR_BLOCKS is not set/' .config
           sed -i 's/^CONFIG_RAID6_PQ=[ym]$/# CONFIG_RAID6_PQ is not set/' .config
-          make LLVM=1 LLVM_IAS=1 CC="ccache clang" LD=ld.lld olddefconfig
+          make LLVM=1 LLVM_IAS=1 CC="ccache clang" olddefconfig
           cd ..
-
-          make LLVM=1 LLVM_IAS=1 CC="ccache clang" LD=ld.lld -j$(grep -c ^processor /proc/cpuinfo) O=out
+          
+          make LLVM=1 LLVM_IAS=1 CC="ccache clang" -j$(grep -c ^processor /proc/cpuinfo) O=out
           ccache --show-stats
           ccache --show-config
+        shell: bash
 
       - name: Build USB/IP kernel modules
         run: |
-          export CLANG_PATH=/home/runner/clang/bin
+          export CLANG_PATH=$HOME/r547379/bin
           export PATH=${CLANG_PATH}:${PATH}
-          export LD=ld.lld
-          cd ${{ env.CheckOut_DIR }}
           make -j$(nproc --all) \
             ARCH=arm64 \
             LLVM=1 \
@@ -372,6 +288,7 @@ jobs:
             modules
           mkdir -p $GITHUB_WORKSPACE/usbip-out/modules
           cp out/drivers/usb/usbip/*.ko $GITHUB_WORKSPACE/usbip-out/modules/
+        shell: bash
 
       - name: Build USB/IP userspace tools (Docker arm64)
         run: |
@@ -452,7 +369,6 @@ jobs:
 
       - name: Extract rtl8188.ko module
         run: |
-          cd ${{ env.CheckOut_DIR }}
           mkdir -p $GITHUB_WORKSPACE/rtl8188-module
           RTL_MODULE=$(find out -name "rtl8188.ko" -type f | head -1)
           if [ -n "$RTL_MODULE" ]; then
@@ -481,8 +397,8 @@ jobs:
       - name: Repack Kernel Artifacts (AnyKernel3)
         run: |
           git clone --depth=1 https://github.com/SOVIET-ANDROID/AnyKernel3.git $HOME/AnyKernel3
-          cp ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/Image.gz-dtb $HOME/AnyKernel3/
-          cp ${{ env.CheckOut_DIR }}/out/arch/arm64/boot/dtbo.img $HOME/AnyKernel3/
+          cp out/arch/arm64/boot/Image.gz-dtb $HOME/AnyKernel3/
+          cp out/arch/arm64/boot/dtbo.img $HOME/AnyKernel3/
           BRANCH=$(echo "${GITHUB_REF#refs/heads/}" | sed 's|/|-|g')
           COMMIT_HASH=$(echo "$GITHUB_SHA" | cut -c1-6)
           ZIP_NAME="${BRANCH}-${COMMIT_HASH}.zip"
@@ -491,6 +407,7 @@ jobs:
           zip -r9 $GITHUB_WORKSPACE/${ZIP_NAME} .
           cd $GITHUB_WORKSPACE
           ls -lah ${ZIP_NAME}
+        shell: bash
 
       - name: Upload Kernel Artifact
         uses: actions/upload-artifact@v4
@@ -498,49 +415,15 @@ jobs:
           name: ${{ env.ZIP_NAME }}
           path: ${{ github.workspace }}/${{ env.ZIP_NAME }}
 
-  Release:
-    needs: [Compile_Raphael_Android16, Collect_Config_Release]
-    runs-on: ubuntu-latest
-    env:
-      Release_DIR: /home/runner/work/release
-    steps:
-      - name: Set current time
-        id: set_time
-        run: echo "time=$(date +'%Y-%m-%d_%H-%M-%S')" >> "$GITHUB_OUTPUT"
-
-      - name: Generate release tag
-        id: tag
-        run: |
-          echo "release_tag=$(date +"%Y%m%d")" >> $GITHUB_OUTPUT
-          touch release.txt
-          echo "SoDebug Kernel Config：" >> release.txt
-          echo "Device Code: raphael" >> release.txt
-          echo "Device Name：Redmi K20 Pro | Mi 9T Pro" >> release.txt
-          echo "Support Android：16.0" >> release.txt
-          echo "KernelSU Git Version：***" >> release.txt
-          echo "KernelSU Version: *****" >> release.txt
-          echo "Patch ID: *******" >> release.txt
-          echo "KernelSU ID: *******" >> release.txt
-          echo "Tested: undefined" >> release.txt
-          echo "Build Date: $(date +"%Y/%m/%d")" >> release.txt
-          echo "status=success" >> $GITHUB_OUTPUT
-
-      - name: Download all workflow run artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ${{ env.Release_DIR }}
-
-      - name: Release
+      - name: Create Release and Upload Assets
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v.${{ steps.tag.outputs.release_tag }}
-          name: ${{ steps.tag.outputs.release_tag }} Kernel for Raphael (Android 16)
-          body_path: release.txt
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
           files: |
-            ${{ env.Release_DIR }}/KernelSU_Patched/*.tar.gz
-            ${{ env.Release_DIR }}/KernelSU_Manager/*.apk
-            ${{ env.Release_DIR }}/*.zip
-            ${{ env.Release_DIR }}/usbip-arm64-bundle.tar.gz
-            ${{ env.Release_DIR }}/rtl8188-module.tar.gz
+            usbip-arm64-bundle.tar.gz
+            ${{ env.ZIP_NAME }}
+            rtl8188-module.tar.gz

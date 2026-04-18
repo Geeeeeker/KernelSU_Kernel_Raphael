@@ -1,4 +1,4 @@
-name: Kernel CI (Fixed)
+name: Kernel CI
 
 on:
   repository_dispatch:
@@ -109,7 +109,6 @@ jobs:
           name: KernelSU_Patched
           path: ${{ env.CheckOut_DIR }}/KernelSU
 
-      # ========== 修改点：手动集成 KernelSU（不再使用 setup.sh） ==========
       - name: Integrate KernelSU manually
         run: |
           cd "${{ env.CheckOut_DIR }}/KernelSU"
@@ -119,21 +118,22 @@ jobs:
           rm KernelSU_*_Patched_*.tar.gz kernelsu_id.txt kernelsu_version.txt
           cd "${{ env.CheckOut_DIR }}"
           
-          # 清理旧的残留
+          # 清理旧目录
           rm -rf drivers/kernelsu
           # 复制 KernelSU 内核源码到 drivers/kernelsu
           cp -r KernelSU/kernel drivers/kernelsu
-          # 修改 drivers/Makefile，添加 kernelsu 子目录
+          
+          # 修改 drivers/Makefile
           if ! grep -q "obj-\$(CONFIG_KSU) += kernelsu/" drivers/Makefile; then
             echo "obj-\$(CONFIG_KSU) += kernelsu/" >> drivers/Makefile
           fi
-          # 修改 drivers/Kconfig，添加 kernelsu 的配置源
+          
+          # 修改 drivers/Kconfig
           if ! grep -q "source \"drivers/kernelsu/Kconfig\"" drivers/Kconfig; then
             echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           fi
           echo "KernelSU manually integrated"
 
-      # ========== 新增：应用五个手动钩子补丁 ==========
       - name: Apply manual hook patches (exec, open, read_write, stat, reboot)
         working-directory: ${{ env.CheckOut_DIR }}
         run: |
@@ -142,36 +142,36 @@ jobs:
           --- a/fs/exec.c
           +++ b/fs/exec.c
           @@ -1886,12 +1886,26 @@ static int do_execveat_common(int fd, struct filename *filename,
-            return retval;
-           }
-           
+             return retval;
+            }
+            
           +#ifdef CONFIG_KSU
           +__attribute__((hot))
           +extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
           +                                void *argv, void *envp, int *flags);
           +#endif
           +
-           int do_execve(struct filename *filename,
-                 const char __user *const __user *__argv,
-                 const char __user *const __user *__envp)
-           {
-             struct user_arg_ptr argv = { .ptr.native = __argv };
-             struct user_arg_ptr envp = { .ptr.native = __envp };
+            int do_execve(struct filename *filename,
+                  const char __user *const __user *__argv,
+                  const char __user *const __user *__envp)
+            {
+              struct user_arg_ptr argv = { .ptr.native = __argv };
+              struct user_arg_ptr envp = { .ptr.native = __envp };
           +#ifdef CONFIG_KSU
           +    ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
           +#endif
-             return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
-           }
-           
+              return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+            }
+            
           @@ -1919,6 +1933,10 @@ static int compat_do_execve(struct filename *filename,
-               .is_compat = true,
-               .ptr.compat = __envp,
-             };
+                .is_compat = true,
+                .ptr.compat = __envp,
+              };
           +#ifdef CONFIG_KSU
           +    ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
           +#endif
-             return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
-           }
+              return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+            }
           EOF
           patch -p1 < exec.patch
 
@@ -180,28 +180,28 @@ jobs:
           --- a/fs/open.c
           +++ b/fs/open.c
           @@ -353,6 +353,10 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
-            return cp_new_stat(&stat, statbuf);
-           }
-           
+             return cp_new_stat(&stat, statbuf);
+            }
+            
           +#ifdef CONFIG_KSU
           +__attribute__((hot)) 
           +extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
           +                                int *mode, int *flags);
           +#endif
           +
-           SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
-           {
-             const struct cred *old_cred;
-           @@ -373,6 +377,10 @@ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
-             unsigned int lookup_flags = LOOKUP_FOLLOW;
-             int res;
-             
+            SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+            {
+              const struct cred *old_cred;
+          @@ -373,6 +377,10 @@ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+              unsigned int lookup_flags = LOOKUP_FOLLOW;
+              int res;
+              
           +#ifdef CONFIG_KSU
           +    ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
           +#endif
           +
-             if (mode & ~S_IRWXO)   /* F_OK, X_OK, W_OK, R_OK 在哪里？ */
-               return -EINVAL;
+              if (mode & ~S_IRWXO)   /* F_OK, X_OK, W_OK, R_OK 在哪里？ */
+                return -EINVAL;
           EOF
           patch -p1 < open.patch
 
@@ -210,28 +210,28 @@ jobs:
           --- a/fs/read_write.c
           +++ b/fs/read_write.c
           @@ -565,6 +565,11 @@ SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
-             return ret;
-           }
-           
+              return ret;
+            }
+            
           +#ifdef CONFIG_KSU
           +extern bool ksu_vfs_read_hook __read_mostly;
           +extern int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);
           +#endif
           +
-           SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
-           {
-             struct fd f = fdget_pos(fd);
-           @@ -572,6 +577,10 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
-           
-             if (f.file) {
-               loff_t pos = file_pos_read(f.file);
+            SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+            {
+              struct fd f = fdget_pos(fd);
+          @@ -572,6 +577,10 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+            
+              if (f.file) {
+                loff_t pos = file_pos_read(f.file);
           +#ifdef CONFIG_KSU
           +      if (unlikely(ksu_vfs_read_hook)) 
           +        ksu_handle_sys_read(fd, &buf, &count);
           +#endif
-               ret = vfs_read(f.file, buf, count, &pos);
-               if (ret >= 0)
-                 file_pos_write(f.file, pos);
+                ret = vfs_read(f.file, buf, count, &pos);
+                if (ret >= 0)
+                  file_pos_write(f.file, pos);
           EOF
           patch -p1 < read_write.patch
 
@@ -240,27 +240,27 @@ jobs:
           --- a/fs/stat.c
           +++ b/fs/stat.c
           @@ -353,6 +353,10 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
-             return cp_new_stat(&stat, statbuf);
-           }
-           
+              return cp_new_stat(&stat, statbuf);
+            }
+            
           +#ifdef CONFIG_KSU
           +__attribute__((hot)) 
           +extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
           +#endif
           +
-           #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
-           SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
-                 struct stat __user *, statbuf, int, flag)
-           @@ -360,6 +364,10 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
-             struct kstat stat;
-             int error;
-           
+          #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
+            SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+                  struct stat __user *, statbuf, int, flag)
+          @@ -360,6 +364,10 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+              struct kstat stat;
+              int error;
+            
           +#ifdef CONFIG_KSU
           +    ksu_handle_stat(&dfd, &filename, &flag);
           +#endif
-             error = vfs_fstatat(dfd, filename, &stat, flag);
-             if (error)
-               return error;
+              error = vfs_fstatat(dfd, filename, &stat, flag);
+              if (error)
+                return error;
           EOF
           patch -p1 < stat.patch
 
@@ -269,27 +269,27 @@ jobs:
           --- a/kernel/reboot.c
           +++ b/kernel/reboot.c
           @@ -277,6 +277,11 @@
-            * reboot 不会同步：请在调用前自行完成同步。
-            */
-           
+             * reboot 不会同步：请在调用前自行完成同步。
+             */
+            
           +#ifdef CONFIG_KSU
           +extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
           +                                 void __user **arg);
           +#endif
           +
-           SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
-                 void __user *, arg)
-           {
-           @@ -284,6 +289,10 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
-             char buffer[256];
-             int ret = 0;
-           
+            SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+                  void __user *, arg)
+            {
+          @@ -284,6 +289,10 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+              char buffer[256];
+              int ret = 0;
+            
           +#ifdef CONFIG_KSU 
           +    ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
           +#endif
-             /* 只有超级用户才被信任执行系统重启。 */
-             if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
-               return -EPERM;
+              /* 只有超级用户才被信任执行系统重启。 */
+              if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
+                return -EPERM;
           EOF
           patch -p1 < reboot.patch
 
@@ -305,13 +305,12 @@ jobs:
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 -b android-10.0.0_r47 --depth=1 --single-branch --no-tags ~/arm-linux-androideabi-4.9
           git clone https://github.com/SoDebug/AnyKernel.git "${{ env.AnyKernel }}"
 
-      # ========== 修改内核配置：启用 KSU 和 MANUAL_HOOK，禁用 INPUT_HOOK ==========
       - name: Configure Kernel (enable KSU manual hook)
         run: |
           cd "${{ env.CheckOut_DIR }}"
           # 生成基础配置
           make LLVM=1 LLVM_IAS=1 O=out raphael_defconfig
-          # 启用 KernelSU
+          # 启用 KernelSU 手动钩子，禁用 input 钩子
           ./scripts/config --file out/.config \
             --enable KSU \
             --enable KSU_MANUAL_HOOK \
@@ -355,7 +354,7 @@ jobs:
           export KCFLAGS="-Wno-vla-extension -Wno-error=unused-command-line-argument"
 
           cd "${{ env.CheckOut_DIR }}"
-          # 直接编译（配置已在上面步骤中生成）
+          # 直接编译（配置已在上一步生成）
           make LLVM=1 LLVM_IAS=1 -j$(nproc) O=out
 
       - name: Packaging the Kernel

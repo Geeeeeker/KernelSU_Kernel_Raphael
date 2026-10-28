@@ -1,181 +1,211 @@
-name: Package AnyKernel3
+name: Repack Kernel to Boot.img & Image.gz-dtb
 
 on:
   workflow_dispatch:
     inputs:
-      kernel_url:
-        description: "Image.gz direct download URL"
-        required: false
-        default: "https://github.com/Geeeeeker/KernelSU_Kernel_Raphael/releases/download/raphael-202610281854/Image.gz"
-        type: string
-      dtbo_url:
-        description: "dtbo.img direct download URL (blank = skip)"
-        required: false
-        default: ""
-        type: string
-      device:
-        description: "Device codename (used in anykernel.sh device.name1 and zip name)"
-        required: false
-        default: "raphael"
-        type: string
-      android_version:
-        description: "Android version label (only for zip name)"
-        required: false
-        default: "14"
-        type: string
-      kernel_string:
-        description: "kernel.string shown by AK3"
-        required: false
-        default: "Kernel for raphael with ReSukiSU + LXC/Docker"
-        type: string
+      base_boot_url:
+        description: '用作底包的 boot.img URL'
+        required: true
+        default: 'https://github.com/Geeeeeker/KernelSU_Kernel_Raphael/raw/refs/heads/raphael-bootx-14-HyperMiui-erofs/boot/boot-lineage-raphael.img'
+      new_kernel_url:
+        description: '需要替换的新内核 Image.gz URL'
+        required: true
+        default: 'https://github.com/Geeeeeker/KernelSU_Kernel_Raphael/releases/download/raphael-202610281854/Image.gz'
+      device_name:
+        description: '设备代号 (用于命名)'
+        required: true
+        default: 'raphael'
       publish_release:
-        description: "Publish the zip as a GitHub Release"
+        description: '是否发布为 GitHub Release'
         required: false
         default: false
         type: boolean
 
-permissions:
-  contents: read
-
 jobs:
-  package:
-    name: Package AnyKernel3
+  repack:
+    name: Repack Kernel
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    outputs:
-      zip_name: ${{ steps.pack.outputs.zip_name }}
-      build_time: ${{ steps.pack.outputs.build_time }}
-    env:
-      DEVICE: ${{ inputs.device }}
-      ANDROID_VERSION: ${{ inputs.android_version }}
-
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install zip
+      - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends zip unzip file curl
+          sudo apt-get install -y --no-install-recommends python3 git curl zip unzip file device-tree-compiler
 
-      - name: Download Image.gz
+      - name: Download tools
         run: |
-          set -euo pipefail
-          curl -fL --retry 3 --retry-delay 2 -o Image.gz "${{ inputs.kernel_url }}"
-          ls -la Image.gz
-          file Image.gz
-          # 简单校验：gzip 头 (1f 8b)
-          magic=$(od -An -tx1 -N2 Image.gz | tr -d ' \n')
-          [ "$magic" = "1f8b" ] || { echo "Image.gz is not a gzip file (magic=$magic)"; exit 1; }
+          set -e
+          # 获取 AOSP 官方的 unpack_bootimg.py 和 mkbootimg.py
+          curl -fL -o unpack_bootimg.py "https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/main/unpack_bootimg.py?format=TEXT" | base64 -d > unpack_bootimg.py
+          curl -fL -o mkbootimg.py "https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/main/mkbootimg.py?format=TEXT" | base64 -d > mkbootimg.py
+          # 获取 extract-dtb.py
+          curl -fL -o extract-dtb.py "https://raw.githubusercontent.com/PabloCastellano/extract-dtb/master/extract-dtb.py"
+          chmod +x unpack_bootimg.py mkbootimg.py extract-dtb.py
+          echo "Tools downloaded."
 
-      - name: Download dtbo.img (optional)
-        if: inputs.dtbo_url != ''
+      - name: Download base boot.img and new Image.gz
         run: |
-          set -euo pipefail
-          curl -fL --retry 3 --retry-delay 2 -o dtbo.img "${{ inputs.dtbo_url }}"
-          ls -la dtbo.img
-          [ -s dtbo.img ] || { echo "dtbo.img is empty"; exit 1; }
+          set -e
+          curl -fL -o boot-base.img "${{ inputs.base_boot_url }}"
+          curl -fL -o Image.gz "${{ inputs.new_kernel_url }}"
+          ls -lh boot-base.img Image.gz
+          file boot-base.img Image.gz
 
-      - name: Setup AnyKernel3
-        id: pack
+      - name: Unpack base boot.img
+        id: unpack
         run: |
-          set -euo pipefail
-
-          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 ak3
-
-          # 1) 内核镜像：URL 下的就是 Image.gz，直接放进去
-          cp Image.gz ak3/Image.gz
-
-          # 2) dtbo：有就放，没有就不放
-          if [ -s dtbo.img ]; then
-            cp dtbo.img ak3/dtbo.img
-            echo "included dtbo.img ($(du -h dtbo.img | cut -f1))"
-          else
-            echo "no dtbo.img included"
+          set -e
+          python3 unpack_bootimg.py --boot_img boot-base.img --out unpacked
+          echo "--- Unpacked files ---"
+          ls -lh unpacked/
+          
+          # 从 unpack_bootimg 的输出中提取 cmdline 等信息，供后续 mkbootimg 使用
+          # 注意：不同 header version 参数名称可能微调，这里适配 v3/v4
+          CMDLINE=$(cat unpacked/boot.img-cmdline 2>/dev/null || cat unpacked/cmdline 2>/dev/null || true)
+          if [ -n "$CMDLINE" ]; then
+            echo "cmdline=$CMDLINE" >> "$GITHUB_OUTPUT"
+            echo "Found cmdline: $CMDLINE"
+          fi
+          
+          PAGESIZE=$(cat unpacked/boot.img-pagesize 2>/dev/null || echo "4096")
+          echo "pagesize=$PAGESIZE" >> "$GITHUB_OUTPUT"
+          
+          # 检查并输出 header_version
+          if [ -f unpacked/boot.img-header_version ]; then
+            HDR_VER=$(cat unpacked/boot.img-header_version)
+            echo "header_version=$HDR_VER" >> "$GITHUB_OUTPUT"
           fi
 
-          cd ak3
+      - name: Extract DTB from base boot.img
+        run: |
+          set -e
+          python3 extract-dtb.py unpacked/boot.img-kernel -o extracted-dtbs || \
+          python3 extract-dtb.py boot-base.img -o extracted-dtbs
+          echo "--- Extracted DTBs ---"
+          ls -lh extracted-dtbs/
+          DTB_COUNT=$(ls extracted-dtbs/*.dtb 2>/dev/null | wc -l)
+          echo "Extracted $DTB_COUNT dtb file(s)."
+          [ "$DTB_COUNT" -gt 0 ] || { echo "No dtb extracted!"; exit 1; }
 
-          # 3) 写 anykernel.sh（无缩进，shell 展开 ${DEVICE} / ${ANDROID_VERSION}）
-          cat >anykernel.sh <<EOF
-          properties() { '
-          kernel.string=${{ inputs.kernel_string }}
-          device.name1=${DEVICE}
-          device.name2=raphaelin
-          device.name3=raphaels
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=0
-          do.cleanup=1
-          do.cleanuponabort=0
-          '; }
-          ramdisk_compression=auto
-          patch_vbmeta_flag=auto
-          is_slot_device=auto
-          block=auto
-          . tools/ak3-core.sh
-          split_boot
-          flash_boot
-          EOF
+      - name: Create Image.gz-dtb
+        run: |
+          set -e
+          # 将所有提取出的 dtb 按顺序拼接，再附加到 Image.gz 后面
+          # 使用 find + sort 保证顺序稳定，避免文件系统顺序差异
+          find extracted-dtbs -name '*.dtb' -print0 | sort -z | xargs -0 cat > combined.dtb
+          ls -lh combined.dtb
+          cat Image.gz combined.dtb > Image.gz-dtb
+          echo "--- Created Image.gz-dtb ---"
+          ls -lh Image.gz-dtb
+          file Image.gz-dtb
 
-          # 校验 anykernel.sh 关键字段
-          grep -q 'device.name1=' anykernel.sh || { echo "anykernel.sh missing device.name1"; exit 1; }
-          grep -q 'flash_boot' anykernel.sh   || { echo "anykernel.sh missing flash_boot"; exit 1; }
+      - name: Repack new boot.img
+        run: |
+          set -e
+          # 准备 mkbootimg 参数
+          MKBOOTIMG_ARGS=(
+            --kernel Image.gz-dtb
+            --ramdisk unpacked/boot.img-ramdisk
+            --output boot-new.img
+          )
+          
+          # 如果解包时获取到了 cmdline，则加上
+          if [ -n "${{ steps.unpack.outputs.cmdline }}" ]; then
+            MKBOOTIMG_ARGS+=(--cmdline "${{ steps.unpack.outputs.cmdline }}")
+          fi
+          
+          # 如果存在 header_version 文件，则指定，否则 mkbootimg 会尝试自动判断（但对旧镜像可能失败）
+          if [ -f unpacked/boot.img-header_version ]; then
+            MKBOOTIMG_ARGS+=(--header_version "$(cat unpacked/boot.img-header_version)")
+          fi
+          
+          # 如果存在 pagesize 文件
+          if [ -f unpacked/boot.img-pagesize ]; then
+            MKBOOTIMG_ARGS+=(--pagesize "$(cat unpacked/boot.img-pagesize)")
+          fi
+          
+          # 如果存在 base address 文件
+          if [ -f unpacked/boot.img-base ]; then
+            MKBOOTIMG_ARGS+=(--base "$(cat unpacked/boot.img-base)")
+          fi
+          
+          # 如果存在 os_version 文件
+          if [ -f unpacked/boot.img-os_version ]; then
+            MKBOOTIMG_ARGS+=(--os_version "$(cat unpacked/boot.img-os_version)")
+          fi
+          
+          # 如果存在 board 文件
+          if [ -f unpacked/boot.img-board ]; then
+            MKBOOTIMG_ARGS+=(--board "$(cat unpacked/boot.img-board)")
+          fi
+          
+          echo "Running: python3 mkbootimg.py ${MKBOOTIMG_ARGS[*]}"
+          python3 mkbootimg.py "${MKBOOTIMG_ARGS[@]}"
+          
+          echo "--- Repacked boot.img ---"
+          ls -lh boot-new.img
+          file boot-new.img
 
-          # 4) 打包
-          DATE=$(date +%Y%m%d)
-          BUILD_TIME=$(date +%Y%m%d%H%M)
-          ZIP_NAME="anykernel3-${DEVICE}-${ANDROID_VERSION}-${DATE}.zip"
-          zip -qr9 "${ZIP_NAME}" . \
-            -x '.git/*' '.github/*' 'README.md' '*.placeholder' '*.zip'
-          ls -la "${ZIP_NAME}"
-          mv "${ZIP_NAME}" "${GITHUB_WORKSPACE}/"
+      - name: Verify outputs
+        run: |
+          set -e
+          echo "=== 产物列表 ==="
+          ls -lh boot-new.img Image.gz-dtb Image.gz combined.dtb
+          
+          # 简单校验 boot-new.img 的 magic
+          python3 - <<'PY'
+          import struct
+          with open('boot-new.img','rb') as f:
+              magic = f.read(8)
+          print("boot magic:", magic)
+          assert magic == b'ANDROID!', "Invalid boot image magic!"
+          print("boot.img magic OK.")
+          PY
 
-          echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
-          echo "build_time=${BUILD_TIME}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload AnyKernel3 zip
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.pack.outputs.zip_name }}
-          path: ${{ github.workspace }}/${{ steps.pack.outputs.zip_name }}
+          name: repacked-${{ inputs.device_name }}
+          path: |
+            boot-new.img
+            Image.gz-dtb
+            combined.dtb
           if-no-files-found: error
 
   release:
     name: Publish release
-    needs: package
+    needs: repack
     if: inputs.publish_release
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download artifact
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: false
 
-      - name: Collect release files
+      - name: Collect files
         run: |
-          set -euo pipefail
+          set -e
           mkdir -p release
-          shopt -s nullglob
-          for f in artifacts/*/*.zip; do
-            [ -f "$f" ] && cp "$f" release/
-          done
-          ls -la release/
+          cp artifacts/repacked-${{ inputs.device_name }}/boot-new.img release/boot-${{ inputs.device_name }}.img
+          cp artifacts/repacked-${{ inputs.device_name }}/Image.gz-dtb release/Image.gz-dtb-${{ inputs.device_name }}
+          ls -lh release/
 
-      - name: Create release
-        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ak3-${{ inputs.device }}-${{ needs.package.outputs.build_time }}
-          name: AK3 · ${{ inputs.device }} · ${{ needs.package.outputs.build_time }}
+          tag_name: repack-${{ inputs.device_name }}-${{ github.run_number }}
+          name: Repack Kernel for ${{ inputs.device_name }} (#${{ github.run_number }})
           body: |
             | | |
-            | --- | --- |
-            | Device | `${{ inputs.device }}` |
-            | Android | `${{ inputs.android_version }}` |
-            | Source | `${{ inputs.kernel_url }}` |
-            | dtbo | `${{ inputs.dtbo_url || 'not included' }}` |
+            |---|---|
+            | Device | `${{ inputs.device_name }}` |
+            | Base boot | `${{ inputs.base_boot_url }}` |
+            | New Kernel | `${{ inputs.new_kernel_url }}` |
 
-            Recovery 里刷 `anykernel3-*.zip`。
+            **刷机方式**
+            - `boot-${{ inputs.device_name }}.img`：Fastboot 刷入 `fastboot flash boot boot-${{ inputs.device_name }}.img`
+            - `Image.gz-dtb-${{ inputs.device_name }}`：可自行放入 AnyKernel3 刷机包（AK3 原生支持此文件名）。
           files: release/*

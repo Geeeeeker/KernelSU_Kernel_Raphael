@@ -19,3 +19,19 @@ else
   exit 1
 fi
 rm -rf rtl8188eus-repo
+
+# 3. 自动修复stat.c声明位置问题。
+python3 - <<'PY'
+import re
+path = 'fs/stat.c'
+src = open(path).read()
+decl = 'extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);'
+# 移除原位置的声明（如果在 #ifdef 块里，把 #ifdef/#endif 一起处理）
+src = re.sub(r'#ifdef CONFIG_KSU\s*\n\s*' + re.escape(decl) + r'\s*\n#endif\s*\n', '', src)
+# 在第一个函数定义前插入声明
+marker = 'SYSCALL_DEFINE'
+idx = src.find(marker)
+src = src[:idx] + f'#ifdef CONFIG_KSU\n{decl}\n#endif\n\n' + src[idx:]
+open(path, 'w').write(src)
+print("moved ksu_handle_stat declaration to top of fs/stat.c")
+PY

@@ -39,7 +39,7 @@ kernel_rel="${KERNEL_DIR#"$ROOT"/}"
 [ "$kernel_rel" = "$KERNEL_DIR" ] && kernel_rel="$(basename "$KERNEL_DIR")"
 
 docker run --rm --platform linux/arm64 \
-  --memory=4g \
+  --memory=3g \
   -v "$ROOT:/workspace" \
   -v "$ROOT/usbip-out:/output" \
   -w "/workspace/$kernel_rel" \

@@ -38,6 +38,8 @@ if [ -d "rtl8188eus-repo/drivers/rtl8188eus" ]; then
   echo 'obj-$(CONFIG_RTL8188EU) += rtl8188eus/' >> drivers/Makefile
   echo 'source "drivers/rtl8188eus/Kconfig"' >> drivers/Kconfig
 else
+
+grep -n 'ksu_handle_stat' fs/stat.c
   echo "Error: rtl8188eus directory not found"
   exit 1
 fi

@@ -204,6 +204,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload kernel image
+        if: env.UPLOAD_KERNEL_IMAGE == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.KERNEL_IMAGE_NAME }}${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
@@ -211,6 +212,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload AnyKernel3
+        if: hashFiles('kernel_workspace/AnyKernel3/**') != ''
         uses: actions/upload-artifact@v4
         with:
           name: AnyKernel3${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
@@ -218,21 +220,21 @@ jobs:
           if-no-files-found: error
 
       - name: Upload DTBO image
-        if: env.CHECK_DTBO_IS_OK == 'true'
+        if: env.UPLOAD_DTBO == 'true' && hashFiles('kernel_workspace/android-kernel/out/arch/arm64/boot/dtbo.img') != ''
         uses: actions/upload-artifact@v4
         with:
           name: dtbo-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
           path: kernel_workspace/android-kernel/out/arch/${{ env.ARCH }}/boot/dtbo.img
 
       - name: Upload boot image
-        if: env.MAKE_BOOT_IMAGE_IS_OK == 'true'
+        if: hashFiles('kernel_workspace/boot.img') != ''
         uses: actions/upload-artifact@v4
         with:
           name: boot${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
           path: kernel_workspace/boot.img
 
       - name: Upload real kernel config
-        if: env.ENABLE_STOCKCONFIG == 'true'
+        if: env.ENABLE_STOCKCONFIG == 'true' && hashFiles('kernel_workspace/android-kernel/out/.config') != ''
         uses: actions/upload-artifact@v4
         with:
           name: config${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}

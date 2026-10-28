@@ -161,9 +161,35 @@ build_kernel() {
 	make -j"$(nproc --all)" CC=clang $args "${KERNEL_CONFIG}" \
 		|| die "defconfig generation failed"
 
-	info "make ${args}"
+	# ------------------------------------------------------------------
+	# 关键改动：显式指定编译目标，避免默认的 `all` 目标连带 `dtbs`。
+	#
+	# ARM64 的 `all` 目标会连带 `dtbs`，而 `dtbs` 又会编译 Makefile.dtbo
+	# 中所有 dtbo-y 条目，包括和当前内核树不兼容的 andromeda-*.dtbo，
+	# 从而在 andromeda-pinctrl.dtsi 处报语法错误。
+	#
+	# 这里只显式编译内核镜像（KERNEL_IMAGE_NAME，默认 Image.gz）和
+	# （若 CONFIG_MODULES=y）模块，完全不进入 dts 目录，因此不会触发
+	# 任何 dtbo/dtb 的编译。
+	#
+	# 如果打包阶段确实需要基础 DTB（例如要塞进 boot.img 的 dtb 段），
+	# 请把下面 extra_dtb 那段取消注释——只列基础 dtb，绝不包含任何
+	# *-overlay.dtbo。
+	# ------------------------------------------------------------------
+	local build_targets="${KERNEL_IMAGE_NAME}"
+	if grep -q '^CONFIG_MODULES=y' "${OUT}/.config" 2>/dev/null; then
+		build_targets="${build_targets} modules"
+	fi
+
+	# local extra_dtb="arch/${ARCH}/boot/dts/qcom/sm8150-xiaomi.dtb \
+	#   arch/${ARCH}/boot/dts/qcom/sm8150-v2-xiaomi.dtb \
+	#   arch/${ARCH}/boot/dts/qcom/sm8150p-xiaomi.dtb \
+	#   arch/${ARCH}/boot/dts/qcom/sm8150p-v2-xiaomi.dtb"
+	# build_targets="${build_targets} ${extra_dtb}"
+
+	info "make ${args} ${build_targets}"
 	# shellcheck disable=SC2086
-	make -j"$(nproc --all)" CC="$cc" $args \
+	make -j"$(nproc --all)" CC="$cc" $args ${build_targets} \
 		|| die "kernel build failed"
 
 	endgroup

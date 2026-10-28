@@ -175,7 +175,10 @@ check_output() {
 	group "Checking build output"
 	local boot="${OUT}/arch/${ARCH}/boot"
 
-	# ---- kernel image: Image.gz <-> Image 回退 ----
+	# ---------------------------------------------------------------- image ---
+	# KERNEL_IMAGE_NAME 来自 config.env，但内核是否真的产出这个文件名
+	# 取决于 CONFIG_KERNEL_GZIP 等配置。在 Image.gz / Image 之间回退，
+	# 避免因为一个未压缩内核就让整个构建失败。
 	local candidates=("${KERNEL_IMAGE_NAME}")
 	case "${KERNEL_IMAGE_NAME}" in
 		Image.gz|Image.gz-dtb) candidates+=("Image" "Image.gz-dtb") ;;
@@ -195,19 +198,39 @@ check_output() {
 		fi
 	done
 
-	[ -n "${image}" ] || die "no kernel image found under ${boot}
+	# 真的一个内核镜像都没有，这才是必须终止的情况。
+	if [ -z "${image}" ]; then
+		die "no kernel image found under ${boot}
        Tried: ${candidates[*]}
        Built files: $(ls "${boot}" 2>/dev/null | tr '\n' ' ')
-       Check KERNEL_IMAGE_NAME and CONFIG_KERNEL_GZIP / CONFIG_KERNEL_*."
+       Check KERNEL_IMAGE_NAME and CONFIG_KERNEL_GZIP / CONFIG_KERNEL_*.
+       If 'Building kernel' produced nothing at all, check that build_kernel()
+       actually ran (grep -n 'make -j' scripts/build.sh)."
+	fi
 
 	ok "kernel image: ${KERNEL_IMAGE_NAME} ($(du -h "${image}" | cut -f1))"
 	export_env CHECK_FILE_IS_OK true
 
-	# ---- dtbo: 缺就创建空占位，让流程继续 ----
+	# package.sh / AnyKernel3 常把 Image.gz 路径写死。内核只产出 Image 时，
+	# 现场压一份 Image.gz，让后续打包步骤能找到文件，而不是 cp: cannot stat。
+	if [ "${KERNEL_IMAGE_NAME}" = "Image" ] && [ ! -f "${boot}/Image.gz" ]; then
+		if gzip -9 -k -f "${image}"; then
+			ok "generated ${boot}/Image.gz from Image (for AnyKernel3)"
+			export_env KERNEL_IMAGE_NAME Image.gz
+			KERNEL_IMAGE_NAME=Image.gz
+			image="${boot}/Image.gz"
+		else
+			warn "failed to gzip Image -> Image.gz; packaging may fail"
+		fi
+	fi
+
+	# ----------------------------------------------------------------- dtbo ---
+	# 缺 dtbo.img 时创建 0 字节占位，让打包流程继续；用 DTBO_IS_PLACEHOLDER
+	# 标记，Upload / release 步骤据此跳过发布，避免空文件被刷入设备。
 	if is_true "${NEED_DTBO:-false}"; then
 		if [ ! -f "${boot}/dtbo.img" ]; then
 			warn "NEED_DTBO=true but ${boot}/dtbo.img was not produced"
-			warn "creating a 0-byte placeholder so packaging can continue"
+			warn "creating 0-byte placeholder so packaging can continue"
 			warn "DO NOT flash this placeholder -- keep the dtbo already on your device"
 			: > "${boot}/dtbo.img"
 			export_env DTBO_IS_PLACEHOLDER true

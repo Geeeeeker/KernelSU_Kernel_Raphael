@@ -34,13 +34,15 @@ jobs:
       - name: Download tools
         run: |
           set -e
-          # 获取 AOSP 官方的 unpack_bootimg.py 和 mkbootimg.py
-          curl -fL -o unpack_bootimg.py "https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/main/unpack_bootimg.py?format=TEXT" | base64 -d > unpack_bootimg.py
-          curl -fL -o mkbootimg.py "https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/main/mkbootimg.py?format=TEXT" | base64 -d > mkbootimg.py
-          # 获取 extract-dtb.py
-          curl -fL -o extract-dtb.py "https://raw.githubusercontent.com/PabloCastellano/extract-dtb/master/extract-dtb.py"
+          # 从 LineageOS 镜像获取 AOSP 官方的 unpack_bootimg.py 和 mkbootimg.py
+          curl -fL -o unpack_bootimg.py "https://raw.githubusercontent.com/LineageOS/android_system_tools_mkbootimg/lineage-19.1/unpack_bootimg.py"
+          curl -fL -o mkbootimg.py "https://raw.githubusercontent.com/LineageOS/android_system_tools_mkbootimg/lineage-19.1/mkbootimg.py"
+          
+          # 获取 extract-dtb.py (使用 ollieparanoid/extract-dtb 仓库的 raw 链接，已验证可用)
+          curl -fL -o extract-dtb.py "https://raw.githubusercontent.com/ollieparanoid/extract-dtb/49da4393611ac5874743736f47bb1555f9004973/extract-dtb.py"
+          
           chmod +x unpack_bootimg.py mkbootimg.py extract-dtb.py
-          echo "Tools downloaded."
+          echo "Tools downloaded and made executable."
 
       - name: Download base boot.img and new Image.gz
         run: |
@@ -58,41 +60,38 @@ jobs:
           echo "--- Unpacked files ---"
           ls -lh unpacked/
           
-          # 从 unpack_bootimg 的输出中提取 cmdline 等信息，供后续 mkbootimg 使用
-          # 注意：不同 header version 参数名称可能微调，这里适配 v3/v4
           CMDLINE=$(cat unpacked/boot.img-cmdline 2>/dev/null || cat unpacked/cmdline 2>/dev/null || true)
           if [ -n "$CMDLINE" ]; then
             echo "cmdline=$CMDLINE" >> "$GITHUB_OUTPUT"
-            echo "Found cmdline: $CMDLINE"
           fi
           
           PAGESIZE=$(cat unpacked/boot.img-pagesize 2>/dev/null || echo "4096")
           echo "pagesize=$PAGESIZE" >> "$GITHUB_OUTPUT"
-          
-          # 检查并输出 header_version
-          if [ -f unpacked/boot.img-header_version ]; then
-            HDR_VER=$(cat unpacked/boot.img-header_version)
-            echo "header_version=$HDR_VER" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Extract DTB from base boot.img
         run: |
           set -e
+          # extract-dtb.py 的输出会包含一个 00_kernel 文件（原始内核镜像）
+          # 我们需要的是它后面分离出的 .dtb 文件
           python3 extract-dtb.py unpacked/boot.img-kernel -o extracted-dtbs || \
           python3 extract-dtb.py boot-base.img -o extracted-dtbs
+          
           echo "--- Extracted DTBs ---"
           ls -lh extracted-dtbs/
-          DTB_COUNT=$(ls extracted-dtbs/*.dtb 2>/dev/null | wc -l)
-          echo "Extracted $DTB_COUNT dtb file(s)."
-          [ "$DTB_COUNT" -gt 0 ] || { echo "No dtb extracted!"; exit 1; }
+          
+          # 过滤掉可能的 00_kernel 文件，只保留 .dtb 文件
+          find extracted-dtbs -name '*.dtb' -print0 | sort -z | xargs -0 cat > combined.dtb
+          
+          if [ ! -s combined.dtb ]; then
+            echo "Error: No valid dtb extracted or combined.dtb is empty."
+            exit 1
+          fi
+          echo "Combined dtb size: $(du -h combined.dtb | cut -f1)"
 
       - name: Create Image.gz-dtb
         run: |
           set -e
-          # 将所有提取出的 dtb 按顺序拼接，再附加到 Image.gz 后面
-          # 使用 find + sort 保证顺序稳定，避免文件系统顺序差异
-          find extracted-dtbs -name '*.dtb' -print0 | sort -z | xargs -0 cat > combined.dtb
-          ls -lh combined.dtb
+          # 这是高通平台的标准做法：将 Image.gz 和合并后的 dtb 直接拼接
           cat Image.gz combined.dtb > Image.gz-dtb
           echo "--- Created Image.gz-dtb ---"
           ls -lh Image.gz-dtb
@@ -101,39 +100,32 @@ jobs:
       - name: Repack new boot.img
         run: |
           set -e
-          # 准备 mkbootimg 参数
           MKBOOTIMG_ARGS=(
             --kernel Image.gz-dtb
             --ramdisk unpacked/boot.img-ramdisk
             --output boot-new.img
           )
           
-          # 如果解包时获取到了 cmdline，则加上
           if [ -n "${{ steps.unpack.outputs.cmdline }}" ]; then
             MKBOOTIMG_ARGS+=(--cmdline "${{ steps.unpack.outputs.cmdline }}")
           fi
           
-          # 如果存在 header_version 文件，则指定，否则 mkbootimg 会尝试自动判断（但对旧镜像可能失败）
           if [ -f unpacked/boot.img-header_version ]; then
             MKBOOTIMG_ARGS+=(--header_version "$(cat unpacked/boot.img-header_version)")
           fi
           
-          # 如果存在 pagesize 文件
           if [ -f unpacked/boot.img-pagesize ]; then
             MKBOOTIMG_ARGS+=(--pagesize "$(cat unpacked/boot.img-pagesize)")
           fi
           
-          # 如果存在 base address 文件
           if [ -f unpacked/boot.img-base ]; then
             MKBOOTIMG_ARGS+=(--base "$(cat unpacked/boot.img-base)")
           fi
           
-          # 如果存在 os_version 文件
           if [ -f unpacked/boot.img-os_version ]; then
             MKBOOTIMG_ARGS+=(--os_version "$(cat unpacked/boot.img-os_version)")
           fi
           
-          # 如果存在 board 文件
           if [ -f unpacked/boot.img-board ]; then
             MKBOOTIMG_ARGS+=(--board "$(cat unpacked/boot.img-board)")
           fi
@@ -149,11 +141,9 @@ jobs:
         run: |
           set -e
           echo "=== 产物列表 ==="
-          ls -lh boot-new.img Image.gz-dtb Image.gz combined.dtb
+          ls -lh boot-new.img Image.gz-dtb combined.dtb
           
-          # 简单校验 boot-new.img 的 magic
           python3 - <<'PY'
-          import struct
           with open('boot-new.img','rb') as f:
               magic = f.read(8)
           print("boot magic:", magic)

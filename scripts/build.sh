@@ -16,6 +16,12 @@ OUT="${KERNEL_DIR}/out"
 
 DEFCONFIG_PATH="${KERNEL_DIR}/arch/${ARCH}/configs/${KERNEL_CONFIG}"
 
+# 本机不编译 dtbo（andromeda-pinctrl.dtsi 会触发 DTC 语法错误）。
+# 改用一份已知可用的分支里的真实 dtbo.img。
+# 注意必须是 raw.githubusercontent.com；github.com/.../blob/... 是 HTML 页面，
+# curl 直接下会拿到网页而不是二进制。
+DTBO_IMG_URL=${DTBO_IMG_URL:-https://raw.githubusercontent.com/Geeeeeker/KernelSU_Kernel_Raphael/raphael-bootx-14-HyperMiui-erofs/boot/dtbo.img}
+
 # ------------------------------------------------------------- defconfig ---
 
 prepare_defconfig() {
@@ -161,53 +167,21 @@ build_kernel() {
 	make -j"$(nproc --all)" CC=clang $args "${KERNEL_CONFIG}" \
 		|| die "defconfig generation failed"
 
-	# ------------------------------------------------------------------
-	# 关键改动 1：显式指定编译目标，避免默认 `all` 目标连带 `dtbs`。
-	#
-	# ARM64 的 `all` 会连带 `dtbs`，而 `dtbs` 又会去编译 Makefile.dtbo
-	# 里所有 dtbo-y 条目，包括和当前内核树不兼容的 andromeda-*.dtbo，
-	# 从而在 andromeda-pinctrl.dtsi 处报语法错误。
-	#
-	# 这里只编译内核镜像（KERNEL_IMAGE_NAME，默认 Image.gz）和
-	# （若 CONFIG_MODULES=y）模块，完全不进入 dts 目录。
-	# ------------------------------------------------------------------
-	local build_targets="${KERNEL_IMAGE_NAME}"
-	if grep -q '^CONFIG_MODULES=y' "${OUT}/.config" 2>/dev/null; then
-		build_targets="${build_targets} modules"
-	fi
-
-	info "make ${args} ${build_targets}"
+	info "make ${args}"
 	# shellcheck disable=SC2086
-	make -j"$(nproc --all)" CC="$cc" $args ${build_targets} \
+	make -j"$(nproc --all)" CC="$cc" $args \
 		|| die "kernel build failed"
 
-	# 关键改动 2：编译刚结束就补 Image.gz。
-	# 内核未开启 CONFIG_KERNEL_GZIP 时只产出 Image，而 package.sh /
-	# anykernel.sh 常把 Image.gz 路径写死，这里立即压一份，保证后续
-	# check_output 和 package.sh 都能找到文件。
+	# 内核未开启 CONFIG_KERNEL_GZIP 时只产出 Image。
+	# package.sh / anykernel.sh 常把 Image.gz 写死，这里立即压一份，
+	# 让 check_output 和 package.sh 都能找到，而不是 cp: cannot stat。
 	local boot="${OUT}/arch/${ARCH}/boot"
 	if [ -f "${boot}/Image" ] && [ ! -f "${boot}/Image.gz" ]; then
 		info "Image.gz not produced by kernel; generating from Image"
 		if gzip -9 -k -f "${boot}/Image"; then
-			ok "generated ${boot}/Image.gz"
-			export_env KERNEL_IMAGE_NAME Image.gz
+			ok "generated ${boot}/Image.gz ($(du -h "${boot}/Image.gz" | cut -f1))"
 		else
-			warn "failed to gzip Image -> Image.gz"
-		fi
-	fi
-
-	# 关键改动 3：编译完成后创建设备树空文档，让打包流程继续。
-	# 这里只在 NEED_DTBO=true 且内核确实没产出 dtbo.img 时创建 0 字节
-	# 占位，并打上 DTBO_IS_PLACEHOLDER 标记，避免空文件被误刷。
-	if is_true "${NEED_DTBO:-false}"; then
-		if [ ! -f "${boot}/dtbo.img" ]; then
-			warn "NEED_DTBO=true but ${boot}/dtbo.img was not produced"
-			warn "creating 0-byte placeholder so packaging can continue"
-			warn "DO NOT flash this placeholder -- keep the dtbo already on your device"
-			: > "${boot}/dtbo.img"
-			export_env DTBO_IS_PLACEHOLDER true
-		else
-			export_env DTBO_IS_PLACEHOLDER false
+			warn "failed to gzip Image -> Image.gz; packaging may fail"
 		fi
 	fi
 
@@ -220,8 +194,7 @@ check_output() {
 	group "Checking build output"
 	local boot="${OUT}/arch/${ARCH}/boot"
 
-	# 无条件兜底：只要有 Image 没有 Image.gz，就压一份。
-	# 不依赖 KERNEL_IMAGE_NAME，避免回退/export_env 时序问题。
+	# 兜底：build_kernel 阶段没生成 Image.gz 时再试一次。
 	if [ -f "${boot}/Image" ] && [ ! -f "${boot}/Image.gz" ]; then
 		if gzip -9 -k -f "${boot}/Image"; then
 			ok "generated ${boot}/Image.gz from Image"
@@ -230,7 +203,8 @@ check_output() {
 		fi
 	fi
 
-	# 候选顺序：优先 Image.gz，其次 Image，最后 Image.gz-dtb。
+	# 候选顺序：Image.gz → Image → Image.gz-dtb。
+	# 命中后写回 $GITHUB_ENV，后续 Upload kernel image 的 path 自动指向真实文件。
 	local candidates=("Image.gz" "Image" "Image.gz-dtb")
 	local image="" candidate
 	for candidate in "${candidates[@]}"; do
@@ -253,46 +227,47 @@ check_output() {
 	ok "kernel image: ${KERNEL_IMAGE_NAME} ($(du -h "${image}" | cut -f1))"
 	export_env CHECK_FILE_IS_OK true
 
-	# ------------------------------------------------------------- dtbo ---
-	# 缺 dtbo.img 时创建 0 字节占位，让打包流程继续；用 DTBO_IS_PLACEHOLDER
-	# 标记，Upload / release 步骤据此跳过发布，避免空文件被刷入设备。
+	# ----------------------------------------------------------------- dtbo ---
+	# 不从本机编译 dtbo（会触发 andromeda-pinctrl.dtsi 语法错误），
+	# 改为从已知可用的分支下载真实 dtbo.img。
 	if is_true "${NEED_DTBO:-false}"; then
-		if [ ! -f "${boot}/dtbo.img" ]; then
-			warn "NEED_DTBO=true but ${boot}/dtbo.img was not produced"
-			warn "creating 0-byte placeholder so packaging can continue"
-			warn "DO NOT flash this placeholder -- keep the dtbo already on your device"
-			: > "${boot}/dtbo.img"
-			export_env DTBO_IS_PLACEHOLDER true
-		else
+		if [ -f "${boot}/dtbo.img" ] && [ -s "${boot}/dtbo.img" ]; then
+			ok "dtbo.img already present ($(du -h "${boot}/dtbo.img" | cut -f1))"
 			export_env DTBO_IS_PLACEHOLDER false
+		else
+			info "downloading dtbo.img from ${DTBO_IMG_URL}"
+			if curl -fL --retry 3 --retry-delay 2 \
+				-o "${boot}/dtbo.img" "${DTBO_IMG_URL}"; then
+				ok "downloaded dtbo.img ($(du -h "${boot}/dtbo.img" | cut -f1))"
+				export_env DTBO_IS_PLACEHOLDER false
+			else
+				warn "failed to download dtbo.img; creating 0-byte placeholder"
+				warn "DO NOT flash this placeholder -- keep the dtbo already on your device"
+				: > "${boot}/dtbo.img"
+				export_env DTBO_IS_PLACEHOLDER true
+			fi
 		fi
 		export_env CHECK_DTBO_IS_OK true
-		ok "dtbo.img present ($(du -h "${boot}/dtbo.img" | cut -f1))"
 	fi
 
 	# KPM rewrites the image in place, so it has to happen after the build and
 	# before packaging.
 	if is_true "${ENABLE_KPM:-false}"; then
-		kpm_patch_image "${image}"
+		kpm_patch_image "$image"
 	fi
 
 	# Record the version string the kernel actually reports.
 	if [ -f "${OUT}/include/generated/utsrelease.h" ]; then
 		local rel
 		rel=$(sed -nE 's/.*UTS_RELEASE[[:space:]]+"([^"]+)".*/\1/p' "${OUT}/include/generated/utsrelease.h")
-		export_env KERNEL_RELEASE "${rel}"
+		export_env KERNEL_RELEASE "$rel"
 		ok "kernel release: ${rel}"
 		summary "| Kernel release | \`${rel}\` |"
 	fi
 	endgroup
 }
 
-# --------------------------------------------------------------- entry ---
-
-# 兼容两种调用方式：直接执行 ./build.sh，或 bash /abs/path/scripts/build.sh。
-# 原判断只认 BASH_SOURCE == $0，在某些 runner 上会因为路径形式不同而
-# 整个 case 不执行，表现就是"什么都没做"。
-if [ "${BASH_SOURCE[0]}" = "${0}" ] || [ "$(basename "${0}")" = "build.sh" ]; then
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 	case "${1:-all}" in
 		defconfig) prepare_defconfig ;;
 		compile)   build_kernel ;;

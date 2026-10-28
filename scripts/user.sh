@@ -21,16 +21,16 @@ fi
 rm -rf rtl8188eus-repo
 
 # 3. 自动修复stat.c声明位置问题。
-python3 - <<'PY'
-import re
-path = 'fs/stat.c'
-src = open(path).read()
-decl = 'extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);'
-# 移除原位置的声明（如果在 #ifdef 块里，把 #ifdef/#endif 一起处理）
-src = re.sub(r'#ifdef CONFIG_KSU\s*\n\s*' + re.escape(decl) + r'\s*\n#endif\s*\n', '', src)
-# 在第一个函数定义前插入声明
-marker = 'SYSCALL_DEFINE'
-idx = src.find(marker)
+grep -n 'ksu_handle_stat' fs/stat.c
+# 修复 KSU stat hook 被插到函数外导致的编译错误
+grep -n 'ksu_handle_stat' fs/stat.c || true
+
+# 只注释“调用语句”形态的行（行首是 ksu_handle_stat 或缩进后是它），
+# 不碰 372 行的 extern 声明
+sed -i 's|^\([[:space:]]*\)ksu_handle_stat(&dfd, &filename, &flag);|\1// ksu_handle_stat(\&dfd, \&filename, \&flag);|' fs/stat.c
+
+# 如果重复应用导致多行，一并注释
+sed -i 's|^\([[:space:]]*\)ksu_handle_stat(&dfd, &filename, &flag);[[:space:]]*$|\1// &|' fs/stat.c
 src = src[:idx] + f'#ifdef CONFIG_KSU\n{decl}\n#endif\n\n' + src[idx:]
 open(path, 'w').write(src)
 print("moved ksu_handle_stat declaration to top of fs/stat.c")

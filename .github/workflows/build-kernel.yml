@@ -177,7 +177,11 @@ jobs:
 
       - name: Apply kernel patches
         run: bash scripts/patches.sh all
-
+        
+      # ⬇️ 新增：编译前修复 fair.c + 添加 rtl8188eus
+      - name: Apply user fixes and drivers
+        run: bash scripts/user.sh
+        
       - name: Set up ccache
         if: env.ENABLE_CCACHE == 'true'
         uses: hendrikmuhs/ccache-action@v1.2
@@ -188,6 +192,10 @@ jobs:
       - name: Build kernel
         run: bash scripts/build.sh all
 
+      # ⬇️ 新增：编译内核模块 + 用户态工具（依赖 out/.config）
+      - name: Build USB/IP modules and userspace tools
+        run: bash scripts/usbip.sh
+        
       - name: Package artifacts
         run: bash scripts/package.sh all
 
@@ -240,7 +248,13 @@ jobs:
           name: config${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
           path: kernel_workspace/android-kernel/out/.config
           include-hidden-files: true
-
+          
+      - name: Upload USB/IP bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: usbip-arm64-bundle
+          path: usbip-arm64-bundle.tar.gz
+          
   # Publishing is a separate job so the build itself runs with a read-only
   # token; only this job gets contents:write, and only when asked for.
   release:

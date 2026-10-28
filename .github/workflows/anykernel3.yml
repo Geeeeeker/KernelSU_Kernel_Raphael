@@ -1,0 +1,181 @@
+name: Package AnyKernel3
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_url:
+        description: "Image.gz direct download URL"
+        required: false
+        default: "https://github.com/Geeeeeker/KernelSU_Kernel_Raphael/releases/download/raphael-202610281854/Image.gz"
+        type: string
+      dtbo_url:
+        description: "dtbo.img direct download URL (blank = skip)"
+        required: false
+        default: ""
+        type: string
+      device:
+        description: "Device codename (used in anykernel.sh device.name1 and zip name)"
+        required: false
+        default: "raphael"
+        type: string
+      android_version:
+        description: "Android version label (only for zip name)"
+        required: false
+        default: "14"
+        type: string
+      kernel_string:
+        description: "kernel.string shown by AK3"
+        required: false
+        default: "Kernel for raphael with ReSukiSU + LXC/Docker"
+        type: string
+      publish_release:
+        description: "Publish the zip as a GitHub Release"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package AnyKernel3
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      zip_name: ${{ steps.pack.outputs.zip_name }}
+      build_time: ${{ steps.pack.outputs.build_time }}
+    env:
+      DEVICE: ${{ inputs.device }}
+      ANDROID_VERSION: ${{ inputs.android_version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zip
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends zip unzip file curl
+
+      - name: Download Image.gz
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 2 -o Image.gz "${{ inputs.kernel_url }}"
+          ls -la Image.gz
+          file Image.gz
+          # 简单校验：gzip 头 (1f 8b)
+          magic=$(od -An -tx1 -N2 Image.gz | tr -d ' \n')
+          [ "$magic" = "1f8b" ] || { echo "Image.gz is not a gzip file (magic=$magic)"; exit 1; }
+
+      - name: Download dtbo.img (optional)
+        if: inputs.dtbo_url != ''
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 2 -o dtbo.img "${{ inputs.dtbo_url }}"
+          ls -la dtbo.img
+          [ -s dtbo.img ] || { echo "dtbo.img is empty"; exit 1; }
+
+      - name: Setup AnyKernel3
+        id: pack
+        run: |
+          set -euo pipefail
+
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 ak3
+
+          # 1) 内核镜像：URL 下的就是 Image.gz，直接放进去
+          cp Image.gz ak3/Image.gz
+
+          # 2) dtbo：有就放，没有就不放
+          if [ -s dtbo.img ]; then
+            cp dtbo.img ak3/dtbo.img
+            echo "included dtbo.img ($(du -h dtbo.img | cut -f1))"
+          else
+            echo "no dtbo.img included"
+          fi
+
+          cd ak3
+
+          # 3) 写 anykernel.sh（无缩进，shell 展开 ${DEVICE} / ${ANDROID_VERSION}）
+          cat >anykernel.sh <<EOF
+          properties() { '
+          kernel.string=${{ inputs.kernel_string }}
+          device.name1=${DEVICE}
+          device.name2=raphaelin
+          device.name3=raphaels
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          '; }
+          ramdisk_compression=auto
+          patch_vbmeta_flag=auto
+          is_slot_device=auto
+          block=auto
+          . tools/ak3-core.sh
+          split_boot
+          flash_boot
+          EOF
+
+          # 校验 anykernel.sh 关键字段
+          grep -q 'device.name1=' anykernel.sh || { echo "anykernel.sh missing device.name1"; exit 1; }
+          grep -q 'flash_boot' anykernel.sh   || { echo "anykernel.sh missing flash_boot"; exit 1; }
+
+          # 4) 打包
+          DATE=$(date +%Y%m%d)
+          BUILD_TIME=$(date +%Y%m%d%H%M)
+          ZIP_NAME="anykernel3-${DEVICE}-${ANDROID_VERSION}-${DATE}.zip"
+          zip -qr9 "${ZIP_NAME}" . \
+            -x '.git/*' '.github/*' 'README.md' '*.placeholder' '*.zip'
+          ls -la "${ZIP_NAME}"
+          mv "${ZIP_NAME}" "${GITHUB_WORKSPACE}/"
+
+          echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
+          echo "build_time=${BUILD_TIME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload AnyKernel3 zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.zip_name }}
+          path: ${{ github.workspace }}/${{ steps.pack.outputs.zip_name }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: package
+    if: inputs.publish_release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: Collect release files
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          shopt -s nullglob
+          for f in artifacts/*/*.zip; do
+            [ -f "$f" ] && cp "$f" release/
+          done
+          ls -la release/
+
+      - name: Create release
+        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
+        with:
+          tag_name: ak3-${{ inputs.device }}-${{ needs.package.outputs.build_time }}
+          name: AK3 · ${{ inputs.device }} · ${{ needs.package.outputs.build_time }}
+          body: |
+            | | |
+            | --- | --- |
+            | Device | `${{ inputs.device }}` |
+            | Android | `${{ inputs.android_version }}` |
+            | Source | `${{ inputs.kernel_url }}` |
+            | dtbo | `${{ inputs.dtbo_url || 'not included' }}` |
+
+            Recovery 里刷 `anykernel3-*.zip`。
+          files: release/*

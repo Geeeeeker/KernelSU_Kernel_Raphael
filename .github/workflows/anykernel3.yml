@@ -34,15 +34,11 @@ jobs:
       - name: Download tools
         run: |
           set -e
-          # 从 LineageOS 镜像获取 AOSP 官方的 unpack_bootimg.py 和 mkbootimg.py
           curl -fL -o unpack_bootimg.py "https://raw.githubusercontent.com/LineageOS/android_system_tools_mkbootimg/lineage-19.1/unpack_bootimg.py"
           curl -fL -o mkbootimg.py "https://raw.githubusercontent.com/LineageOS/android_system_tools_mkbootimg/lineage-19.1/mkbootimg.py"
-          
-          # 获取 extract-dtb.py (使用 ollieparanoid/extract-dtb 仓库的 raw 链接，已验证可用)
           curl -fL -o extract-dtb.py "https://raw.githubusercontent.com/ollieparanoid/extract-dtb/49da4393611ac5874743736f47bb1555f9004973/extract-dtb.py"
-          
           chmod +x unpack_bootimg.py mkbootimg.py extract-dtb.py
-          echo "Tools downloaded and made executable."
+          echo "Tools downloaded."
 
       - name: Download base boot.img and new Image.gz
         run: |
@@ -59,29 +55,38 @@ jobs:
           python3 unpack_bootimg.py --boot_img boot-base.img --out unpacked
           echo "--- Unpacked files ---"
           ls -lh unpacked/
-          
+
+          # 动态查找 ramdisk：优先 boot.img-ramdisk，其次 ramdisk
+          RAMDISK=""
+          for c in unpacked/boot.img-ramdisk unpacked/ramdisk; do
+            if [ -f "$c" ]; then RAMDISK="$c"; break; fi
+          done
+          if [ -z "$RAMDISK" ]; then
+            echo "Error: no ramdisk found in unpacked/"
+            exit 1
+          fi
+          echo "ramdisk=$RAMDISK" >> "$GITHUB_OUTPUT"
+          echo "Found ramdisk: $RAMDISK"
+
           CMDLINE=$(cat unpacked/boot.img-cmdline 2>/dev/null || cat unpacked/cmdline 2>/dev/null || true)
           if [ -n "$CMDLINE" ]; then
             echo "cmdline=$CMDLINE" >> "$GITHUB_OUTPUT"
           fi
-          
-          PAGESIZE=$(cat unpacked/boot.img-pagesize 2>/dev/null || echo "4096")
+
+          PAGESIZE=$(cat unpacked/boot.img-pagesize 2>/dev/null || cat unpacked/pagesize 2>/dev/null || echo "4096")
           echo "pagesize=$PAGESIZE" >> "$GITHUB_OUTPUT"
 
       - name: Extract DTB from base boot.img
         run: |
           set -e
-          # extract-dtb.py 的输出会包含一个 00_kernel 文件（原始内核镜像）
-          # 我们需要的是它后面分离出的 .dtb 文件
           python3 extract-dtb.py unpacked/boot.img-kernel -o extracted-dtbs || \
           python3 extract-dtb.py boot-base.img -o extracted-dtbs
-          
+
           echo "--- Extracted DTBs ---"
           ls -lh extracted-dtbs/
-          
-          # 过滤掉可能的 00_kernel 文件，只保留 .dtb 文件
+
           find extracted-dtbs -name '*.dtb' -print0 | sort -z | xargs -0 cat > combined.dtb
-          
+
           if [ ! -s combined.dtb ]; then
             echo "Error: No valid dtb extracted or combined.dtb is empty."
             exit 1
@@ -91,7 +96,6 @@ jobs:
       - name: Create Image.gz-dtb
         run: |
           set -e
-          # 这是高通平台的标准做法：将 Image.gz 和合并后的 dtb 直接拼接
           cat Image.gz combined.dtb > Image.gz-dtb
           echo "--- Created Image.gz-dtb ---"
           ls -lh Image.gz-dtb
@@ -102,37 +106,52 @@ jobs:
           set -e
           MKBOOTIMG_ARGS=(
             --kernel Image.gz-dtb
-            --ramdisk unpacked/boot.img-ramdisk
+            --ramdisk "${{ steps.unpack.outputs.ramdisk }}"
             --output boot-new.img
           )
-          
+
           if [ -n "${{ steps.unpack.outputs.cmdline }}" ]; then
             MKBOOTIMG_ARGS+=(--cmdline "${{ steps.unpack.outputs.cmdline }}")
           fi
-          
-          if [ -f unpacked/boot.img-header_version ]; then
-            MKBOOTIMG_ARGS+=(--header_version "$(cat unpacked/boot.img-header_version)")
-          fi
-          
-          if [ -f unpacked/boot.img-pagesize ]; then
-            MKBOOTIMG_ARGS+=(--pagesize "$(cat unpacked/boot.img-pagesize)")
-          fi
-          
-          if [ -f unpacked/boot.img-base ]; then
-            MKBOOTIMG_ARGS+=(--base "$(cat unpacked/boot.img-base)")
-          fi
-          
-          if [ -f unpacked/boot.img-os_version ]; then
-            MKBOOTIMG_ARGS+=(--os_version "$(cat unpacked/boot.img-os_version)")
-          fi
-          
-          if [ -f unpacked/boot.img-board ]; then
-            MKBOOTIMG_ARGS+=(--board "$(cat unpacked/boot.img-board)")
-          fi
-          
+
+          for f in boot.img-header_version header_version; do
+            if [ -f "unpacked/$f" ]; then
+              MKBOOTIMG_ARGS+=(--header_version "$(cat "unpacked/$f")")
+              break
+            fi
+          done
+
+          for f in boot.img-pagesize pagesize; do
+            if [ -f "unpacked/$f" ]; then
+              MKBOOTIMG_ARGS+=(--pagesize "$(cat "unpacked/$f")")
+              break
+            fi
+          done
+
+          for f in boot.img-base base; do
+            if [ -f "unpacked/$f" ]; then
+              MKBOOTIMG_ARGS+=(--base "$(cat "unpacked/$f")")
+              break
+            fi
+          done
+
+          for f in boot.img-os_version os_version; do
+            if [ -f "unpacked/$f" ]; then
+              MKBOOTIMG_ARGS+=(--os_version "$(cat "unpacked/$f")")
+              break
+            fi
+          done
+
+          for f in boot.img-board board; do
+            if [ -f "unpacked/$f" ]; then
+              MKBOOTIMG_ARGS+=(--board "$(cat "unpacked/$f")")
+              break
+            fi
+          done
+
           echo "Running: python3 mkbootimg.py ${MKBOOTIMG_ARGS[*]}"
           python3 mkbootimg.py "${MKBOOTIMG_ARGS[@]}"
-          
+
           echo "--- Repacked boot.img ---"
           ls -lh boot-new.img
           file boot-new.img
@@ -142,7 +161,7 @@ jobs:
           set -e
           echo "=== 产物列表 ==="
           ls -lh boot-new.img Image.gz-dtb combined.dtb
-          
+
           python3 - <<'PY'
           with open('boot-new.img','rb') as f:
               magic = f.read(8)

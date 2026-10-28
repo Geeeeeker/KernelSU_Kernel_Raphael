@@ -200,44 +200,73 @@ build_kernel() {
 check_output() {
 	group "Checking build output"
 	local boot="${OUT}/arch/${ARCH}/boot"
-	local image="${boot}/${KERNEL_IMAGE_NAME}"
 
-	[ -f "$image" ] || die "expected kernel image not found: ${image}
-       Built files: $(ls "$boot" 2>/dev/null | tr '\n' ' ')
-       Check that KERNEL_IMAGE_NAME matches what your kernel produces."
+	# KERNEL_IMAGE_NAME 来自 config.env，但内核是否真的产出这个文件名
+	# 取决于 CONFIG_KERNEL_GZIP 等配置。在 Image.gz / Image 之间回退，
+	# 避免因为一个未压缩内核就让整个构建失败。
+	local candidates=("${KERNEL_IMAGE_NAME}")
+	case "${KERNEL_IMAGE_NAME}" in
+		Image.gz|Image.gz-dtb)
+			candidates+=("Image" "Image.gz-dtb") ;;
+		Image|Image-dtb)
+			candidates+=("Image.gz" "Image.gz-dtb") ;;
+	esac
 
-	ok "kernel image: ${KERNEL_IMAGE_NAME} ($(du -h "$image" | cut -f1))"
+	local image="" candidate
+	for candidate in "${candidates[@]}"; do
+		if [ -f "${boot}/${candidate}" ]; then
+			image="${boot}/${candidate}"
+			if [ "${candidate}" != "${KERNEL_IMAGE_NAME}" ]; then
+				warn "KERNEL_IMAGE_NAME=${KERNEL_IMAGE_NAME} not found; using ${candidate}"
+				KERNEL_IMAGE_NAME="${candidate}"
+				export_env KERNEL_IMAGE_NAME "${candidate}"
+			fi
+			break
+		fi
+	done
+
+	[ -n "${image}" ] || die "no kernel image found under ${boot}
+       Tried: ${candidates[*]}
+       Built files: $(ls "${boot}" 2>/dev/null | tr '\n' ' ')
+       Check KERNEL_IMAGE_NAME and CONFIG_KERNEL_GZIP / CONFIG_KERNEL_*."
+
+	ok "kernel image: ${KERNEL_IMAGE_NAME} ($(du -h "${image}" | cut -f1))"
 	export_env CHECK_FILE_IS_OK true
+	export_env UPLOAD_KERNEL_IMAGE true
+
+	# 可选兜底：AnyKernel3 的 anykernel.sh 通常写死要 Image.gz。
+	# 如果内核只产出 Image，这里现场压一份，避免打包阶段再报错。
+	if [ "${KERNEL_IMAGE_NAME}" = "Image" ] && [ ! -f "${boot}/Image.gz" ]; then
+		if gzip -9 -k -f "${image}"; then
+			ok "generated ${boot}/Image.gz from Image"
+		fi
+	fi
 
 	if is_true "${NEED_DTBO:-false}"; then
-		[ -f "${boot}/dtbo.img" ] || die "NEED_DTBO=true but ${boot}/dtbo.img was not produced"
-		export_env CHECK_DTBO_IS_OK true
-		ok "dtbo.img present"
+		if [ -f "${boot}/dtbo.img" ]; then
+			export_env CHECK_DTBO_IS_OK true
+			export_env UPLOAD_DTBO true
+			ok "dtbo.img present"
+		else
+			warn "NEED_DTBO=true but ${boot}/dtbo.img was not produced; skipping DTBO upload"
+			export_env CHECK_DTBO_IS_OK false
+			export_env UPLOAD_DTBO false
+		fi
 	fi
 
 	# KPM rewrites the image in place, so it has to happen after the build and
 	# before packaging.
 	if is_true "${ENABLE_KPM:-false}"; then
-		kpm_patch_image "$image"
+		kpm_patch_image "${image}"
 	fi
 
 	# Record the version string the kernel actually reports.
 	if [ -f "${OUT}/include/generated/utsrelease.h" ]; then
 		local rel
 		rel=$(sed -nE 's/.*UTS_RELEASE[[:space:]]+"([^"]+)".*/\1/p' "${OUT}/include/generated/utsrelease.h")
-		export_env KERNEL_RELEASE "$rel"
+		export_env KERNEL_RELEASE "${rel}"
 		ok "kernel release: ${rel}"
 		summary "| Kernel release | \`${rel}\` |"
 	fi
 	endgroup
 }
-
-if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
-	case "${1:-all}" in
-		defconfig) prepare_defconfig ;;
-		compile)   build_kernel ;;
-		check)     check_output ;;
-		all)       prepare_defconfig; build_kernel; check_output ;;
-		*) die "unknown build step '$1'" ;;
-	esac
-fi

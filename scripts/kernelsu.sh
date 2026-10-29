@@ -40,22 +40,18 @@ KERNEL_DIR=${KERNEL_DIR:?KERNEL_DIR must point at the kernel source tree}
 ksu_registry() {
 	case "$1" in
 	kernelsu)
-		# Official upstream. Dropped non-GKI support at v1.0, so legacy kernels
-		# are pinned to the last release that supports them.
 		echo "https://github.com/tiann/KernelSU|main|KernelSU||v0.9.5|-|KernelSU" ;;
 	kernelsu-next)
-		# 'next' was renamed to 'legacy' and the default branch is now 'dev'.
-		# Raw URLs containing /next/ only still work via GitHub's rename
-		# redirect, so we address the real branches directly.
 		echo "https://github.com/KernelSU-Next/KernelSU-Next|dev|KernelSU-Next|dev|legacy|-|KernelSU-Next" ;;
 	sukisu-ultra)
-		# Repo moved from the personal ShirkNeko account into its own org.
 		# 'main' is the modular v4 tree (KPM, no SUSFS); 'builtin' is the
 		# non-GKI/source-integrated tree and is the only one with SUSFS Kconfig.
 		echo "https://github.com/SukiSU-Ultra/SukiSU-Ultra|main|KernelSU|main|builtin|builtin|SukiSU-Ultra" ;;
 	resukisu)
 		# Re-fork of SukiSU-Ultra aimed at legacy/non-GKI kernels.
-		echo "https://github.com/ReSukiSU/ReSukiSU|main|KernelSU|main|main|-|ReSukiSU" ;;
+		# SUSFS is NOT bundled; it must be applied via the inline-hook patch
+		# script from the SUSFS ecosystem (see apply_resukisu_susfs below).
+		echo "https://github.com/ReSukiSU/ReSukiSU|main|KernelSU|main|main|inline-hook|ReSukiSU" ;;
 	rsuntk)
 		echo "https://github.com/rsuntk/KernelSU|main|KernelSU|main|main|susfs-rksu-master|RKSU (rsuntk)" ;;
 	backslashxx)
@@ -67,9 +63,6 @@ ksu_registry() {
 
 ksu_field() { ksu_registry "$1" | cut -d'|' -f"$2"; }
 
-# ReSukiSU's setup.sh checks out 'main' when given no argument, while every
-# other variant checks out the latest tag. Call that out so an unpinned CI
-# build is not silently tracking a moving branch.
 ksu_default_is_branch() { [ "$1" = "resukisu" ]; }
 
 # ---------------------------------------------------------------- install ---
@@ -134,11 +127,6 @@ ksu_install() {
 	local link="${KERNEL_DIR}/drivers/kernelsu"
 	[ -e "$link" ] || die "drivers/kernelsu symlink was not created"
 
-	# setup.sh only checks whether the word "kernelsu" already appears.  Some
-	# vendor trees carry an obsolete line guarded by CONFIG_WITH_KERNEL_SU, so
-	# setup.sh reports success without adding the CONFIG_KSU rule and the final
-	# link fails with every ksu_handle_* symbol undefined.  Normalize any stale
-	# rule to the symbol declared by the installed Kconfig.
 	local driver_makefile="${KERNEL_DIR}/drivers/Makefile"
 	if ! grep -qE '^[[:space:]]*obj-\$\(CONFIG_KSU\)[[:space:]]*\+=[[:space:]]*kernelsu/?[[:space:]]*$' "$driver_makefile"; then
 		if grep -qE '^[[:space:]]*obj-\$\(CONFIG_[A-Z0-9_]+\)[[:space:]]*\+=[[:space:]]*kernelsu/?[[:space:]]*$' "$driver_makefile"; then
@@ -187,33 +175,77 @@ ksu_install() {
 
 	ksu_resolve_hook_mode "${KSU_HOOK_MODE:-auto}" "$kver"
 
+	# --- SUSFS for ReSukiSU ------------------------------------------------
+	# ReSukiSU does not bundle SUSFS. For non-GKI kernels the supported path
+	# is the susfs_inline_hook patch script, which replaces the legacy
+	# 10_enable_susfs_for_ksu.patch entirely.
+	if [ "$variant" = "resukisu" ] && [ "$susfs_refs" = "inline-hook" ]; then
+		apply_resukisu_susfs "$KERNEL_DIR" "$kver"
+	fi
+
 	summary "| KernelSU variant | \`${name}\` |"
 	summary "| KernelSU ref | \`${ref:-latest tag}\` -> \`${version_label}\` |"
 
 	endgroup
 }
 
-# ------------------------------------------------------------ hook config ---
+# --------------------------------------------------- ReSukiSU SUSFS patch ---
 #
-# Which hook mechanism a variant should use is genuinely version- and
-# fork-specific. 'auto' picks the option that the variant actually declares.
+# The SUSFS project explicitly states that non-GKI kernels need the inline-hook
+# patches rather than the old flat-layout KernelSU patches. The script below
+# fetches a community-maintained susfs_inline_hook_patches.sh and runs it from
+# the kernel root. Adjust SUSFS_INLINE_HOOK_URL if the upstream location moves.
+apply_resukisu_susfs() {
+	local kernel_dir=$1 kver=$2
 
-# Resolve 'auto' into a concrete mode and publish it.
-#
-# This has to happen once, early, and be reused by BOTH the source-patching
-# step and the defconfig step. Resolving it independently in each place is how
-# you end up setting CONFIG_KSU_MANUAL_HOOK on a tree whose syscall entry
-# points were never actually patched -- which builds fine and then does
-# nothing at runtime.
+	# Community-maintained inline-hook patch script for non-GKI SUSFS.
+	# This is the path referenced by users who have ReSukiSU + SUSFS working
+	# on 5.4 kernels.
+	local SUSFS_INLINE_HOOK_URL="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh"
+	local patch_script="${kernel_dir}/susfs_inline_hook_patches.sh"
+
+	group "Applying SUSFS inline-hook patches for ReSukiSU (kernel ${kver})"
+
+	info "fetching ${SUSFS_INLINE_HOOK_URL}"
+	if ! fetch_stdout "$SUSFS_INLINE_HOOK_URL" > "$patch_script"; then
+		rm -f "$patch_script"
+		die "failed to fetch SUSFS inline-hook patch script from ${SUSFS_INLINE_HOOK_URL}"
+	fi
+	chmod +x "$patch_script"
+
+	info "running susfs_inline_hook_patches.sh from ${kernel_dir}"
+	(
+		cd "$kernel_dir"
+		bash ./susfs_inline_hook_patches.sh
+	) || die "SUSFS inline-hook patch script failed"
+
+	# The inline-hook script copies susfs source files and applies the kernel
+	# side hunks. Confirm the key files landed.
+	for f in fs/susfs.c include/linux/susfs.h; do
+		[ -f "${kernel_dir}/${f}" ] || die "SUSFS file missing after inline-hook patch: ${f}"
+	done
+	ok "SUSFS inline-hook patches applied"
+
+	# Ensure the kernel config declares SUSFS support.
+	local defconfig
+	defconfig=$(kernel_defconfig "$kernel_dir") || die "could not locate kernel defconfig"
+	kconf_enable "$defconfig" CONFIG_KSU_SUSFS
+	ok "enabled CONFIG_KSU_SUSFS in ${defconfig}"
+
+	# Clean up the downloaded script; it is not part of the kernel tree.
+	rm -f "$patch_script"
+
+	endgroup
+}
+
+# ------------------------------------------------------------ hook config ---
+
 ksu_resolve_hook_mode() {
 	local mode=${1:-auto} kver=$2
 	if [ "$mode" = "auto" ]; then
 		if ver_ge "$kver" "5.10"; then
 			mode="kprobes"
 		else
-			# kprobes on pre-GKI kernels is the classic source of "KernelSU
-			# installed but su does nothing" reports; manual hooks are patched
-			# straight into the syscall entry points instead.
 			mode="manual"
 		fi
 		info "hook mode 'auto' resolved to '${mode}' for kernel ${kver}"
@@ -242,16 +274,12 @@ ksu_hook_configs() {
 	manual)
 		case "$variant" in
 			kernelsu-next)  kconf_enable "$defconfig" CONFIG_KSU_MANUAL_HOOK ;;
-			sukisu-ultra)
-				kconf_enable "$defconfig" CONFIG_KSU_MANUAL_HOOK ;;
+			sukisu-ultra)  kconf_enable "$defconfig" CONFIG_KSU_MANUAL_HOOK ;;
 			resukisu)
-				# ReSukiSU's non-GKI static export check requires the complete
-				# kallsyms table unless every internal SELinux symbol is exported
-				# manually by the vendor tree.
 				kconf_set_many "$defconfig" \
 					CONFIG_KSU_MANUAL_HOOK=y CONFIG_DEBUG_KERNEL=y \
 					CONFIG_KALLSYMS=y CONFIG_KALLSYMS_ALL=y ;;
-			*) : ;;  # tiann/KernelSU 0.9.x infers manual hooks from the source patch
+			*) : ;;
 		esac
 		;;
 	tracepoint)

@@ -49,9 +49,10 @@ ksu_registry() {
 		echo "https://github.com/SukiSU-Ultra/SukiSU-Ultra|main|KernelSU|main|builtin|builtin|SukiSU-Ultra" ;;
 	resukisu)
 		# Re-fork of SukiSU-Ultra aimed at legacy/non-GKI kernels.
-		# SUSFS is NOT bundled; it must be applied via the inline-hook patch
-		# script from the SUSFS ecosystem (see apply_resukisu_susfs below).
-		echo "https://github.com/ReSukiSU/ReSukiSU|main|KernelSU|main|main|inline-hook|ReSukiSU" ;;
+		# SUSFS is NOT bundled; the kernel-side patch is applied by
+		# apply_resukisu_susfs() below. The KernelSU-side 10_ patch is
+		# deliberately skipped: it targets the old flat KSU layout.
+		echo "https://github.com/ReSukiSU/ReSukiSU|main|KernelSU|main|main|kernel-patch|ReSukiSU" ;;
 	rsuntk)
 		echo "https://github.com/rsuntk/KernelSU|main|KernelSU|main|main|susfs-rksu-master|RKSU (rsuntk)" ;;
 	backslashxx)
@@ -175,11 +176,8 @@ ksu_install() {
 
 	ksu_resolve_hook_mode "${KSU_HOOK_MODE:-auto}" "$kver"
 
-	# --- SUSFS for ReSukiSU ------------------------------------------------
-	# ReSukiSU does not bundle SUSFS. For non-GKI kernels the supported path
-	# is the susfs_inline_hook patch script, which replaces the legacy
-	# 10_enable_susfs_for_ksu.patch entirely.
-	if [ "$variant" = "resukisu" ] && [ "$susfs_refs" = "inline-hook" ]; then
+	# --- SUSFS kernel-side integration for ReSukiSU ------------------------
+	if [ "$variant" = "resukisu" ] && [ "$susfs_refs" = "kernel-patch" ]; then
 		apply_resukisu_susfs "$KERNEL_DIR" "$kver"
 	fi
 
@@ -191,50 +189,145 @@ ksu_install() {
 
 # --------------------------------------------------- ReSukiSU SUSFS patch ---
 #
-# The SUSFS project explicitly states that non-GKI kernels need the inline-hook
-# patches rather than the old flat-layout KernelSU patches. The script below
-# fetches a community-maintained susfs_inline_hook_patches.sh and runs it from
-# the kernel root. Adjust SUSFS_INLINE_HOOK_URL if the upstream location moves.
+# ReSukiSU does not bundle SUSFS. For non-GKI kernels, the supported path is
+# the kernel-side patch 50_add_susfs_in_kernel-<ver>.patch from susfs4ksu. The
+# companion KernelSU-side patch 10_enable_susfs_for_ksu.patch is intentionally
+# NOT applied: it targets KernelSU's old flat source layout and will always
+# reject against modern forks such as ReSukiSU. ReSukiSU handles the KSU-side
+# SUSFS plumbing itself via CONFIG_KSU_SUSFS.
 apply_resukisu_susfs() {
 	local kernel_dir=$1 kver=$2
 
-	# Community-maintained inline-hook patch script for non-GKI SUSFS.
-	# This is the path referenced by users who have ReSukiSU + SUSFS working
-	# on 5.4 kernels.
-	local SUSFS_INLINE_HOOK_URL="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh"
-	local patch_script="${kernel_dir}/susfs_inline_hook_patches.sh"
+	group "Applying SUSFS kernel patches for ReSukiSU (kernel ${kver})"
 
-	group "Applying SUSFS inline-hook patches for ReSukiSU (kernel ${kver})"
+	# susfs4ksu ref: the 1.4.2-kernel-5.4 tag is the last non-GKI 5.4 snapshot
+	# and the only 5.4 ref whose kernel-side patch is known to apply cleanly
+	# against vendor QGKI trees like Raphael's. Override via SUSFS_REF if a
+	# newer fork is verified.
+	local SUSFS_REPO=${SUSFS_REPO:-"https://github.com/simonpunk/susfs4ksu.git"}
+	local SUSFS_REF=${SUSFS_REF:-"1.4.2-kernel-5.4"}
 
-	info "fetching ${SUSFS_INLINE_HOOK_URL}"
-	if ! fetch_stdout "$SUSFS_INLINE_HOOK_URL" > "$patch_script"; then
-		rm -f "$patch_script"
-		die "failed to fetch SUSFS inline-hook patch script from ${SUSFS_INLINE_HOOK_URL}"
+	local susfs_tmp
+	susfs_tmp=$(mktemp -d)
+
+	info "cloning SUSFS from ${SUSFS_REPO} (ref ${SUSFS_REF})"
+	if ! git clone --depth=1 --branch "$SUSFS_REF" "$SUSFS_REPO" "$susfs_tmp" >/dev/null 2>&1; then
+		rm -rf "$susfs_tmp"
+		die "failed to clone ${SUSFS_REPO} at ref '${SUSFS_REF}'"
 	fi
-	chmod +x "$patch_script"
+	ok "SUSFS source cloned"
 
-	info "running susfs_inline_hook_patches.sh from ${kernel_dir}"
-	(
-		cd "$kernel_dir"
-		bash ./susfs_inline_hook_patches.sh
-	) || die "SUSFS inline-hook patch script failed"
-
-	# The inline-hook script copies susfs source files and applies the kernel
-	# side hunks. Confirm the key files landed.
-	for f in fs/susfs.c include/linux/susfs.h; do
-		[ -f "${kernel_dir}/${f}" ] || die "SUSFS file missing after inline-hook patch: ${f}"
+	# Step 1: copy the SUSFS core source files into the kernel tree.
+	local copied=0
+	local f src dst
+	for f in fs/susfs.c fs/sus_su.c include/linux/susfs.h include/linux/sus_su.h include/linux/susfs_def.h; do
+		src="${susfs_tmp}/kernel_patches/${f}"
+		dst="${kernel_dir}/${f}"
+		if [ -f "$src" ]; then
+			mkdir -p "$(dirname "$dst")"
+			cp "$src" "$dst"
+			copied=$((copied+1))
+		fi
 	done
-	ok "SUSFS inline-hook patches applied"
+	[ "$copied" -ge 2 ] || { rm -rf "$susfs_tmp"; die "no SUSFS source files found under ${susfs_tmp}/kernel_patches"; }
+	ok "copied ${copied} SUSFS source files into kernel tree"
 
-	# Ensure the kernel config declares SUSFS support.
+	# Step 2: apply the kernel-side patch. This wires fs/Makefile, fs/Kconfig
+	# and inserts the SUSFS hooks into fs/open.c, fs/stat.c, fs/read_write.c,
+	# fs/exec.c, kernel/sys.c, kernel/reboot.c, drivers/input/input.c,
+	# security/selinux/hooks.c, etc.
+	local patch="${susfs_tmp}/kernel_patches/50_add_susfs_in_kernel-5.4.patch"
+	[ -f "$patch" ] || { rm -rf "$susfs_tmp"; die "kernel-side patch missing: $patch"; }
+
+	info "applying 50_add_susfs_in_kernel-5.4.patch"
+	local patch_log="${kernel_dir}/.susfs_patch.log"
+	if ! (cd "$kernel_dir" && patch -p1 --forward < "$patch" > "$patch_log" 2>&1); then
+		warn "50_add_susfs_in_kernel-5.4.patch did not apply cleanly"
+		grep -nE 'FAILED|Hunk|Reversed|already' "$patch_log" | head -20 || true
+		rm -rf "$susfs_tmp"
+		die "SUSFS kernel patch failed; see ${patch_log}"
+	fi
+	ok "50_add_susfs_in_kernel-5.4.patch applied"
+	rm -f "$patch_log"
+
+	# Step 3: deliberately skip 10_enable_susfs_for_ksu.patch.
+	info "skipping 10_enable_susfs_for_ksu.patch (obsolete for modern KSU forks)"
+
+	# Step 4: ensure the top-level Kconfig symbol is selectable in defconfig.
 	local defconfig
-	defconfig=$(kernel_defconfig "$kernel_dir") || die "could not locate kernel defconfig"
+	defconfig=$(kernel_defconfig "$kernel_dir") || { rm -rf "$susfs_tmp"; die "could not locate kernel defconfig"; }
+
+	# 50 patch normally appends CONFIG_KSU_SUSFS to fs/Kconfig. If a vendor
+	# tree resisted it, insert a minimal menu block ourselves.
+	if ! grep -q 'config KSU_SUSFS' "${kernel_dir}/fs/Kconfig"; then
+		warn "fs/Kconfig missing KSU_SUSFS entries; inserting minimal block"
+		python3 - "$kernel_dir/fs/Kconfig" <<'PY'
+import sys
+path = sys.argv[1]
+s = open(path).read()
+if 'config KSU_SUSFS' in s:
+    sys.exit(0)
+marker = 'menu "File systems"'
+idx = s.find(marker)
+if idx < 0:
+    sys.exit('menu "File systems" not found in fs/Kconfig')
+insert_at = s.find('\n', idx) + 1
+block = '''
+config KSU_SUSFS
+\tbool "KernelSU SUSFS support"
+\tdefault y
+\thelp
+\t  SUSFS hides mounts, paths and kstat from root detection.
+
+config KSU_SUSFS_SUS_PATH
+\tbool "SUSFS: hide suspicious paths"
+\tdepends on KSU_SUSFS
+\tdefault y
+
+config KSU_SUSFS_SUS_MOUNT
+\tbool "SUSFS: hide suspicious mounts"
+\tdepends on KSU_SUSFS
+\tdefault y
+
+config KSU_SUSFS_SUS_KSTAT
+\tbool "SUSFS: fake kstat"
+\tdepends on KSU_SUSFS
+\tdefault y
+
+config KSU_SUSFS_SPOOF_UNAME
+\tbool "SUSFS: spoof uname"
+\tdepends on KSU_SUSFS
+\tdefault y
+
+config KSU_SUSFS_ENABLE_LOG
+\tbool "SUSFS: enable logging"
+\tdepends on KSU_SUSFS
+\tdefault n
+
+config KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+\tbool "SUSFS: hide KSU/SUSFS symbols"
+\tdepends on KSU_SUSFS
+\tdefault y
+
+config KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+\tbool "SUSFS: spoof cmdline"
+\tdepends on KSU_SUSFS
+\tdefault y
+
+config KSU_SUSFS_OPEN_REDIRECT
+\tbool "SUSFS: open redirect"
+\tdepends on KSU_SUSFS
+\tdefault y
+'''
+open(path, 'w').write(s[:insert_at] + block + s[insert_at:])
+PY
+		ok "inserted KSU_SUSFS Kconfig block into fs/Kconfig"
+	fi
+
 	kconf_enable "$defconfig" CONFIG_KSU_SUSFS
 	ok "enabled CONFIG_KSU_SUSFS in ${defconfig}"
 
-	# Clean up the downloaded script; it is not part of the kernel tree.
-	rm -f "$patch_script"
-
+	rm -rf "$susfs_tmp"
 	endgroup
 }
 

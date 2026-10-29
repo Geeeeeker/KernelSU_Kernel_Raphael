@@ -24,9 +24,6 @@ set -euo pipefail
 
 KERNEL_DIR=${KERNEL_DIR:?KERNEL_DIR must point at the kernel source tree}
 
-# This tree's defconfig is known and fixed; no searching required.
-KERNEL_DEFCONFIG_REL="arch/arm64/configs/raphael_defconfig"
-
 # ------------------------------------------------------------- registry -----
 #
 # Fields, '|'-separated:
@@ -37,20 +34,28 @@ KERNEL_DEFCONFIG_REL="arch/arm64/configs/raphael_defconfig"
 #   5 default ref for legacy (< 5.10) kernels
 #   6 refs that already contain SUSFS support (space separated; '-' for none)
 #   7 human-readable name
+#
+# Verified against each repo's live branch/tag list on 2026-07-27.
 
 ksu_registry() {
 	case "$1" in
 	kernelsu)
+		# Official upstream. Dropped non-GKI support at v1.0, so legacy kernels
+		# are pinned to the last release that supports them.
 		echo "https://github.com/tiann/KernelSU|main|KernelSU||v0.9.5|-|KernelSU" ;;
 	kernelsu-next)
+		# 'next' was renamed to 'legacy' and the default branch is now 'dev'.
+		# Raw URLs containing /next/ only still work via GitHub's rename
+		# redirect, so we address the real branches directly.
 		echo "https://github.com/KernelSU-Next/KernelSU-Next|dev|KernelSU-Next|dev|legacy|-|KernelSU-Next" ;;
 	sukisu-ultra)
+		# Repo moved from the personal ShirkNeko account into its own org.
+		# 'main' is the modular v4 tree (KPM, no SUSFS); 'builtin' is the
+		# non-GKI/source-integrated tree and is the only one with SUSFS Kconfig.
 		echo "https://github.com/SukiSU-Ultra/SukiSU-Ultra|main|KernelSU|main|builtin|builtin|SukiSU-Ultra" ;;
 	resukisu)
-		# SUSFS is NOT bundled. Kernel-side patch applied by
-		# apply_resukisu_susfs() below. The KernelSU-side 10_ patch is
-		# deliberately skipped: it targets the old flat KSU layout.
-		echo "https://github.com/ReSukiSU/ReSukiSU|main|KernelSU|main|main|kernel-patch|ReSukiSU" ;;
+		# Re-fork of SukiSU-Ultra aimed at legacy/non-GKI kernels.
+		echo "https://github.com/ReSukiSU/ReSukiSU|main|KernelSU|main|main|-|ReSukiSU" ;;
 	rsuntk)
 		echo "https://github.com/rsuntk/KernelSU|main|KernelSU|main|main|susfs-rksu-master|RKSU (rsuntk)" ;;
 	backslashxx)
@@ -62,6 +67,9 @@ ksu_registry() {
 
 ksu_field() { ksu_registry "$1" | cut -d'|' -f"$2"; }
 
+# ReSukiSU's setup.sh checks out 'main' when given no argument, while every
+# other variant checks out the latest tag. Call that out so an unpinned CI
+# build is not silently tracking a moving branch.
 ksu_default_is_branch() { [ "$1" = "resukisu" ]; }
 
 # ---------------------------------------------------------------- install ---
@@ -77,6 +85,7 @@ ksu_install() {
 	group "Installing ${name}"
 	info "repository: ${repo}"
 
+	# Decide which ref to check out.
 	local kver ref=$requested_ref
 	kver=$(kernel_version "$KERNEL_DIR" || echo "0.0")
 	if [ -z "$ref" ]; then
@@ -88,6 +97,7 @@ ksu_install() {
 		fi
 	fi
 
+	# Validate before handing the ref to setup.sh, which would swallow a typo.
 	if [ -n "$ref" ]; then
 		info "validating ref '${ref}' exists in ${repo}"
 		ref_exists "$repo" "$ref" \
@@ -105,6 +115,7 @@ ksu_install() {
 		warn "Pin KSU_REF (e.g. a tag) if you need reproducible builds."
 	fi
 
+	# Run the variant's own installer.
 	local setup_url="https://raw.githubusercontent.com/${repo#https://github.com/}/${setup_ref}/kernel/setup.sh"
 	info "running ${setup_url}"
 	(
@@ -116,12 +127,18 @@ ksu_install() {
 		fi
 	) || die "${name} setup.sh failed"
 
+	# --- verify the installer actually did what it claims ------------------
 	local ksu_dir="${KERNEL_DIR}/${dir}"
 	[ -d "$ksu_dir" ] || die "${name} setup.sh finished but ${dir}/ is missing"
 
 	local link="${KERNEL_DIR}/drivers/kernelsu"
 	[ -e "$link" ] || die "drivers/kernelsu symlink was not created"
 
+	# setup.sh only checks whether the word "kernelsu" already appears.  Some
+	# vendor trees carry an obsolete line guarded by CONFIG_WITH_KERNEL_SU, so
+	# setup.sh reports success without adding the CONFIG_KSU rule and the final
+	# link fails with every ksu_handle_* symbol undefined.  Normalize any stale
+	# rule to the symbol declared by the installed Kconfig.
 	local driver_makefile="${KERNEL_DIR}/drivers/Makefile"
 	if ! grep -qE '^[[:space:]]*obj-\$\(CONFIG_KSU\)[[:space:]]*\+=[[:space:]]*kernelsu/?[[:space:]]*$' "$driver_makefile"; then
 		if grep -qE '^[[:space:]]*obj-\$\(CONFIG_[A-Z0-9_]+\)[[:space:]]*\+=[[:space:]]*kernelsu/?[[:space:]]*$' "$driver_makefile"; then
@@ -138,6 +155,7 @@ ksu_install() {
 	grep -q 'drivers/kernelsu/Kconfig' "${KERNEL_DIR}/drivers/Kconfig" \
 		|| die "drivers/Kconfig was not wired up for kernelsu"
 
+	# Confirm we landed on the ref we asked for, catching the silent fallback.
 	local head_desc head_sha
 	head_sha=$(git -C "$ksu_dir" rev-parse --short HEAD)
 	head_desc=$(git -C "$ksu_dir" describe --tags --always 2>/dev/null || echo "$head_sha")
@@ -150,6 +168,7 @@ ksu_install() {
 	fi
 	ok "${name} installed at ${head_desc} (${head_sha})"
 
+	# --- publish facts the later steps need --------------------------------
 	local count version_label
 	count=$(git -C "$ksu_dir" rev-list --count HEAD 2>/dev/null || echo 0)
 	if git -C "$ksu_dir" describe --exact-match --tags >/dev/null 2>&1; then
@@ -168,186 +187,33 @@ ksu_install() {
 
 	ksu_resolve_hook_mode "${KSU_HOOK_MODE:-auto}" "$kver"
 
-	if [ "$variant" = "resukisu" ] && [ "$susfs_refs" = "kernel-patch" ]; then
-		apply_resukisu_susfs "$KERNEL_DIR" "$kver"
-	fi
-
 	summary "| KernelSU variant | \`${name}\` |"
 	summary "| KernelSU ref | \`${ref:-latest tag}\` -> \`${version_label}\` |"
 
 	endgroup
 }
 
-# --------------------------------------------------- ReSukiSU SUSFS patch ---
-
-apply_resukisu_susfs() {
-	local kernel_dir=$1 kver=$2
-
-	group "Applying SUSFS kernel patches for ReSukiSU (kernel ${kver})"
-
-	local SUSFS_REPO=${SUSFS_REPO:-"https://github.com/simonpunk/susfs4ksu.git"}
-	local SUSFS_REF=${SUSFS_REF:-"1.4.2-kernel-5.4"}
-
-	local susfs_tmp
-	susfs_tmp=$(mktemp -d)
-
-	info "cloning SUSFS from ${SUSFS_REPO} (ref ${SUSFS_REF})"
-	if ! git clone --depth=1 --branch "$SUSFS_REF" "$SUSFS_REPO" "$susfs_tmp" >/dev/null 2>&1; then
-		rm -rf "$susfs_tmp"
-		die "failed to clone ${SUSFS_REPO} at ref '${SUSFS_REF}'"
-	fi
-	ok "SUSFS source cloned"
-
-	local copied=0
-	local f src dst
-	for f in fs/susfs.c fs/sus_su.c include/linux/susfs.h include/linux/sus_su.h include/linux/susfs_def.h; do
-		src="${susfs_tmp}/kernel_patches/${f}"
-		dst="${kernel_dir}/${f}"
-		if [ -f "$src" ]; then
-			mkdir -p "$(dirname "$dst")"
-			cp "$src" "$dst"
-			copied=$((copied+1))
-		fi
-	done
-	[ "$copied" -ge 2 ] || { rm -rf "$susfs_tmp"; die "no SUSFS source files found under ${susfs_tmp}/kernel_patches"; }
-	ok "copied ${copied} SUSFS source files into kernel tree"
-
-	local patch="${susfs_tmp}/kernel_patches/50_add_susfs_in_kernel-5.4.patch"
-	[ -f "$patch" ] || { rm -rf "$susfs_tmp"; die "kernel-side patch missing: $patch"; }
-
-	info "applying 50_add_susfs_in_kernel-5.4.patch"
-	local patch_log="${kernel_dir}/.susfs_patch.log"
-	if ! (cd "$kernel_dir" && patch -p1 --forward < "$patch" > "$patch_log" 2>&1); then
-		warn "50_add_susfs_in_kernel-5.4.patch did not apply cleanly"
-		grep -nE 'FAILED|Hunk|Reversed|already' "$patch_log" | head -20 || true
-		rm -rf "$susfs_tmp"
-		die "SUSFS kernel patch failed; see ${patch_log}"
-	fi
-	ok "50_add_susfs_in_kernel-5.4.patch applied"
-		# --- 手动补充 SUSFS/ReSukiSU 缺失的 setresuid 钩子 ---
-	local sys_c="${kernel_dir}/kernel/sys.c"
-	if [ -f "$sys_c" ] && ! grep -q 'ksu_handle_setresuid' "$sys_c"; then
-		warn "setresuid hook missing, attempting to inject..."
-		python3 - "$sys_c" <<'PY'
-import sys, re
-path = sys.argv[1]
-s = open(path).read()
-
-# 匹配 setresuid 函数定义
-pat = re.compile(r'(SYSCALL_DEFINE3\(setresuid,\s*uid_t,\s*ruid,\s*uid_t,\s*euid,\s*uid_t,\s*suid\)\s*\{)', re.S)
-m = pat.search(s)
-if not m:
-    sys.exit('setresuid syscall definition not found')
-
-# 在函数开始处插入钩子调用
-hook = '''
-#ifdef CONFIG_KSU
-	{
-		extern int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid);
-		ksu_handle_setresuid(ruid, euid);
-	}
-#endif
-'''
-s = s[:m.end()] + hook + s[m.end():]
-open(path, 'w').write(s)
-print("Injected ksu_handle_setresuid hook into kernel/sys.c")
-PY
-		ok "setresuid hook injected"
-	else
-		info "setresuid hook already present or kernel/sys.c not found"
-	fi
-	rm -f "$patch_log"
-
-	info "skipping 10_enable_susfs_for_ksu.patch (obsolete for modern KSU forks)"
-
-	# Fixed defconfig path for this tree.
-	local defconfig="${kernel_dir}/${KERNEL_DEFCONFIG_REL}"
-	if [ ! -f "$defconfig" ]; then
-		rm -rf "$susfs_tmp"
-		die "defconfig not found at ${defconfig}"
-	fi
-	ok "using defconfig: ${defconfig}"
-
-	if ! grep -q 'config KSU_SUSFS' "${kernel_dir}/fs/Kconfig"; then
-		warn "fs/Kconfig missing KSU_SUSFS entries; inserting minimal block"
-		python3 - "$kernel_dir/fs/Kconfig" <<'PY'
-import sys
-path = sys.argv[1]
-s = open(path).read()
-if 'config KSU_SUSFS' in s:
-    sys.exit(0)
-marker = 'menu "File systems"'
-idx = s.find(marker)
-if idx < 0:
-    sys.exit('menu "File systems" not found in fs/Kconfig')
-insert_at = s.find('\n', idx) + 1
-block = '''
-config KSU_SUSFS
-\tbool "KernelSU SUSFS support"
-\tdefault y
-\thelp
-\t  SUSFS hides mounts, paths and kstat from root detection.
-
-config KSU_SUSFS_SUS_PATH
-\tbool "SUSFS: hide suspicious paths"
-\tdepends on KSU_SUSFS
-\tdefault y
-
-config KSU_SUSFS_SUS_MOUNT
-\tbool "SUSFS: hide suspicious mounts"
-\tdepends on KSU_SUSFS
-\tdefault y
-
-config KSU_SUSFS_SUS_KSTAT
-\tbool "SUSFS: fake kstat"
-\tdepends on KSU_SUSFS
-\tdefault y
-
-config KSU_SUSFS_SPOOF_UNAME
-\tbool "SUSFS: spoof uname"
-\tdepends on KSU_SUSFS
-\tdefault y
-
-config KSU_SUSFS_ENABLE_LOG
-\tbool "SUSFS: enable logging"
-\tdepends on KSU_SUSFS
-\tdefault n
-
-config KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
-\tbool "SUSFS: hide KSU/SUSFS symbols"
-\tdepends on KSU_SUSFS
-\tdefault y
-
-config KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
-\tbool "SUSFS: spoof cmdline"
-\tdepends on KSU_SUSFS
-\tdefault y
-
-config KSU_SUSFS_OPEN_REDIRECT
-\tbool "SUSFS: open redirect"
-\tdepends on KSU_SUSFS
-\tdefault y
-'''
-open(path, 'w').write(s[:insert_at] + block + s[insert_at:])
-PY
-		ok "inserted KSU_SUSFS Kconfig block into fs/Kconfig"
-	fi
-
-	kconf_enable "$defconfig" CONFIG_KSU_SUSFS
-	ok "enabled CONFIG_KSU_SUSFS in ${defconfig}"
-
-	rm -rf "$susfs_tmp"
-	endgroup
-}
-
 # ------------------------------------------------------------ hook config ---
+#
+# Which hook mechanism a variant should use is genuinely version- and
+# fork-specific. 'auto' picks the option that the variant actually declares.
 
+# Resolve 'auto' into a concrete mode and publish it.
+#
+# This has to happen once, early, and be reused by BOTH the source-patching
+# step and the defconfig step. Resolving it independently in each place is how
+# you end up setting CONFIG_KSU_MANUAL_HOOK on a tree whose syscall entry
+# points were never actually patched -- which builds fine and then does
+# nothing at runtime.
 ksu_resolve_hook_mode() {
 	local mode=${1:-auto} kver=$2
 	if [ "$mode" = "auto" ]; then
 		if ver_ge "$kver" "5.10"; then
 			mode="kprobes"
 		else
+			# kprobes on pre-GKI kernels is the classic source of "KernelSU
+			# installed but su does nothing" reports; manual hooks are patched
+			# straight into the syscall entry points instead.
 			mode="manual"
 		fi
 		info "hook mode 'auto' resolved to '${mode}' for kernel ${kver}"
@@ -376,12 +242,16 @@ ksu_hook_configs() {
 	manual)
 		case "$variant" in
 			kernelsu-next)  kconf_enable "$defconfig" CONFIG_KSU_MANUAL_HOOK ;;
-			sukisu-ultra)  kconf_enable "$defconfig" CONFIG_KSU_MANUAL_HOOK ;;
+			sukisu-ultra)
+				kconf_enable "$defconfig" CONFIG_KSU_MANUAL_HOOK ;;
 			resukisu)
+				# ReSukiSU's non-GKI static export check requires the complete
+				# kallsyms table unless every internal SELinux symbol is exported
+				# manually by the vendor tree.
 				kconf_set_many "$defconfig" \
 					CONFIG_KSU_MANUAL_HOOK=y CONFIG_DEBUG_KERNEL=y \
 					CONFIG_KALLSYMS=y CONFIG_KALLSYMS_ALL=y ;;
-			*) : ;;
+			*) : ;;  # tiann/KernelSU 0.9.x infers manual hooks from the source patch
 		esac
 		;;
 	tracepoint)
@@ -395,6 +265,7 @@ ksu_hook_configs() {
 	esac
 }
 
+# Only run the installer when sourced as a script entry point.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 	ksu_install "${KSU_VARIANT:-none}" "${KSU_REF:-}"
 fi

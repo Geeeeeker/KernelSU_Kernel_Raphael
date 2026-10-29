@@ -298,5 +298,22 @@ PKG_EOF
     fi
 }
 
+
+
+
+
+
 # >>> 关键：这里必须调用！<<<
 fix_sukisu_fsnotify_compat
+
+allowlist_file="${KERNEL_DIR}/drivers/kernelsu/policy/allowlist.c"
+
+# 1. 在 <linux/sched.h> 后补充 <linux/sched/task.h> (5.7 之前需要)
+if ! grep -q 'linux/sched/task.h' "$allowlist_file"; then
+    sed -i '/#include <linux\/sched.h>/a #include <linux/sched/task.h>' "$allowlist_file"
+fi
+
+# 2. 将 TWA_RESUME 替换为 5.4 兼容的 true
+if grep -q 'TWA_RESUME' "$allowlist_file"; then
+    sed -i 's/task_work_add(tsk, cb, TWA_RESUME)/task_work_add(tsk, cb, true)/' "$allowlist_file"
+fi

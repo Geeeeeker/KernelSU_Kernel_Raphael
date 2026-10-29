@@ -1028,6 +1028,7 @@ fix_sukisu_pgtable_include
 fix_allowlist_for_54
 install_rtl8188eus
 fix_cpu_spoof_for_54
+install_selinux_rules
 
 
 # ============================================================

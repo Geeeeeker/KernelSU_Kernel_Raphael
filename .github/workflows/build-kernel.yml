@@ -191,6 +191,15 @@ jobs:
           rm -f "$KDIR/out/drivers/kernelsu/manager/pkg_observer.o" 2>/dev/null || true
           head -2 "$DST"
           
+      - name: Replace rules.c (5.10-version-aware)
+        run: |
+          KDIR="${{ github.workspace }}/kernel_workspace/android-kernel"
+          DST="$KDIR/drivers/kernelsu/selinux/rules.c"
+          [ -f "$DST" ] || { echo "target missing: $DST"; exit 1; }
+          cp -v patches/rules.c "$DST"
+          rm -f "$KDIR/out/drivers/kernelsu/selinux/rules.o" 2>/dev/null || true
+          grep -c 'SELINUX_POLICY_INSTEAD_SELINUX_SS' "$DST"
+          
       - name: Set up ccache
         if: env.ENABLE_CCACHE == 'true'
         uses: hendrikmuhs/ccache-action@v1.2

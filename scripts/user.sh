@@ -171,6 +171,57 @@ PY
     fi
 }
 
+# ========== 修复 rules.c 在 5.4 内核上 SELinux 结构体不兼容 ==========
+fix_selinux_rules_for_54() {
+    local f="${KERNEL_DIR}/drivers/kernelsu/selinux/rules.c"
+    if [ ! -f "$f" ]; then
+        echo "[-] rules.c not found at $f; skipping"
+        return 0
+    fi
+
+    if grep -q 'SUSFS_SELINUX_RULES_COMPAT' "$f"; then
+        echo "[*] rules.c already patched"
+        return 0
+    fi
+
+    python3 - "$f" <<'PY'
+import sys, re
+path = sys.argv[1]
+src = open(path).read()
+
+# 找到包含 selinux_state.policy 的代码块，并插入版本判断
+# 匹配类似 apply_kernelsu_rules 函数中的代码
+pattern = r'(struct selinux_policy \*policy = rcu_dereference\(selinux_state\.policy\);)'
+if not re.search(pattern, src):
+    print('[-] Could not locate selinux_state.policy usage; aborting', file=sys.stderr)
+    sys.exit(1)
+
+# 在函数开头添加版本判断
+src = re.sub(
+    r'(\s*rcu_read_lock\(\);)(\s*struct selinux_policy \*policy = rcu_dereference\(selinux_state\.policy\);)',
+    r'\1\n#ifdef SELINUX_POLICY_INSTEAD_SELINUX_SS\2\n#else\n\tstruct selinux_ss *ss = rcu_dereference(selinux_state.ss);\n\tstruct policydb *db = &ss->policydb;\n#endif',
+    src, count=1
+)
+
+# 确保定义了 SELINUX_POLICY_INSTEAD_SELINUX_SS 宏
+if '#define SELINUX_POLICY_INSTEAD_SELINUX_SS' not in src:
+    src = src.replace(
+        '#include "ss/services.h"',
+        '#include "ss/services.h"\n\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n#define SELINUX_POLICY_INSTEAD_SELINUX_SS\n#endif',
+        1
+    )
+
+open(path, 'w').write(src)
+print('[+] rules.c patched with SELINUX_POLICY_INSTEAD_SELINUX_SS guard')
+PY
+
+    if grep -q 'SELINUX_POLICY_INSTEAD_SELINUX_SS' "$f"; then
+        echo "[+] rules.c verified"
+    else
+        echo "[-] FAIL: rules.c patch not applied"
+        return 1
+    fi
+}
 
 # ============================================================
 # 执行
@@ -179,6 +230,7 @@ fix_sukisu_pgtable_include
 fix_allowlist_for_54
 install_rtl8188eus
 fix_cpu_spoof_for_54
+fix_selinux_rules_for_54
 
 # ============================================================
 # 4. 打印 allowlist.c 全文，便于在 CI 日志中核对

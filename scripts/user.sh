@@ -73,23 +73,25 @@ fix_sukisu_pgtable_include
 
 
 # ========== 修复 SukiSU-Ultra 在 5.4 内核上 fsnotify_ops 不兼容 ==========
-# handle_inode_event 是 Linux 5.9+ 的 fsnotify_ops 字段，5.4 只有 handle_event
-# 且两者签名互不兼容。在 <5.9 上整文件禁用 pkg_observer，只留空 stub。
-# ========== 用兼容 5.4 的版本覆写 SukiSU-Ultra 的 pkg_observer.c ==========
-# 上游 builtin 分支的 pkg_observer.c 是旧版，无条件使用 handle_inode_event
-# （5.9+ 字段）。用带版本判断的新版整文件覆写，天然兼容 5.4。
+# 背景：
+#   1) handle_inode_event 是 5.9+ 的 fsnotify_ops 字段，5.4 只有 handle_event；
+#   2) 上游 KSU_DECL_FSNOTIFY_OPS 宏无条件展开成 handle_inode_event 的签名，
+#      即便把字段名换成 .handle_event，签名仍然不匹配 → 必须自己定义
+#      一个 handle_event 签名的函数（仅 5.4 及以下）；
+#   3) 用带 LINUX_VERSION_CODE 守卫的整文件覆写最稳。
 fix_sukisu_fsnotify_compat() {
     local f="${KERNEL_DIR}/drivers/kernelsu/manager/pkg_observer.c"
     [ -f "$f" ] || { echo "[-] pkg_observer.c not found at $f"; return 0; }
 
-    # 如果已经有版本判断，说明是新版，什么都不用做
-    if grep -q 'LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)' "$f"; then
-        echo "[*] pkg_observer.c already has 5.9 guard, skipping"
+    # 只认我们自己的 marker，避免上游偶然出现的版本字符串误判“已修复”
+    if grep -q 'SUSFS_FSNOTIFY_COMPAT_V2' "$f"; then
+        echo "[*] pkg_observer.c already replaced (V2), skipping"
         return 0
     fi
 
-    if grep -q 'SUSFS_FSNOTIFY_COMPAT_V2' "$f"; then
-        echo "[*] pkg_observer.c already replaced with V2"
+    # 只有仍存在未加守卫的 .handle_inode_event 才需要覆写
+    if ! grep -q '\.handle_inode_event[[:space:]]*=[[:space:]]*ksu_handle_inode_event' "$f"; then
+        echo "[*] pkg_observer.c has no unguarded .handle_inode_event, skipping"
         return 0
     fi
 
@@ -124,7 +126,8 @@ static struct fsnotify_group *g;
 
 #include "pkg_observer_defs.h"
 
-static KSU_DECL_FSNOTIFY_OPS(ksu_handle_inode_event)
+/* 共享业务逻辑：只依赖 mask + file_name */
+static int ksu_pkg_observer_common(u32 mask, const struct qstr *file_name)
 {
 	if (!file_name)
 		return 0;
@@ -145,11 +148,31 @@ static KSU_DECL_FSNOTIFY_OPS(ksu_handle_inode_event)
 	return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+/* 5.9+：handle_inode_event 签名 */
+static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask,
+				  struct inode *inode, struct inode *dir,
+				  const struct qstr *file_name, u32 cookie)
+{
+	return ksu_pkg_observer_common(mask, file_name);
+}
+#else
+/* <=5.8：handle_event 签名 */
+static int ksu_handle_event(struct fsnotify_group *group,
+			    struct inode *inode, u32 mask,
+			    const void *data, int data_type,
+			    const struct qstr *file_name, u32 cookie,
+			    struct fsnotify_iter_info *iter_info)
+{
+	return ksu_pkg_observer_common(mask, file_name);
+}
+#endif
+
 static const struct fsnotify_ops ksu_ops = {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 	.handle_inode_event = ksu_handle_inode_event,
 #else
-	.handle_event = ksu_handle_inode_event,
+	.handle_event = ksu_handle_event,
 #endif
 };
 
@@ -262,9 +285,11 @@ void __exit ksu_observer_exit(void)
 }
 PKG_EOF
 
-    # 立刻验证
-    if grep -q 'LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)' "$f" \
-       && grep -q 'SUSFS_FSNOTIFY_COMPAT_V2' "$f"; then
+    # 立即验证：marker + 守卫 + 两套函数 + 两套字段引用
+    if grep -q 'SUSFS_FSNOTIFY_COMPAT_V2' "$f" \
+       && grep -q '^#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)' "$f" \
+       && grep -q '\.handle_inode_event = ksu_handle_inode_event' "$f" \
+       && grep -q '\.handle_event = ksu_handle_event' "$f"; then
         echo "[+] pkg_observer.c replaced (lines: $(wc -l < "$f"))"
     else
         echo "[-] Replacement verification failed; restoring backup"
@@ -272,3 +297,6 @@ PKG_EOF
         return 1
     fi
 }
+
+# >>> 关键：这里必须调用！<<<
+fix_sukisu_fsnotify_compat

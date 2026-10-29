@@ -72,67 +72,69 @@ fix_sukisu_pgtable_include
 
 
 
-
 # ========== 修复 SukiSU-Ultra 在 5.4 内核上 fsnotify_ops 不兼容 ==========
-# 背景：handle_inode_event 是 5.9+ 的特性；5.4 只有 handle_event，
-#       且两者签名不同，无法直接转换。在 <5.9 内核上禁用 pkg_observer。
+# handle_inode_event 是 Linux 5.9+ 的 fsnotify_ops 字段，5.4 只有 handle_event
+# 且两者签名互不兼容。在 <5.9 上整文件禁用 pkg_observer，只留空 stub。
 fix_sukisu_fsnotify_compat() {
     local kver
     kver=$(sed -nE 's/^VERSION[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' Makefile | head -1).\
 $(sed -nE 's/^PATCHLEVEL[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' Makefile | head -1)
 
-    # 只在 < 5.9 时处理（5.9 及以上已有 handle_inode_event）
     if [ "$(printf '%s\n' "5.9" "$kver" | sort -V | head -1)" != "5.9" ]; then
-        echo "[*] Kernel $kver already supports handle_inode_event, skipping fsnotify fix"
+        echo "[*] Kernel $kver >= 5.9, skipping fsnotify fix"
         return 0
     fi
 
     local f="${KERNEL_DIR}/drivers/kernelsu/manager/pkg_observer.c"
-    if [ ! -f "$f" ]; then
-        echo "[-] pkg_observer.c not found, skipping fsnotify fix"
-        return 0
-    fi
+    [ -f "$f" ] || { echo "[-] pkg_observer.c not found"; return 0; }
 
-    # 如果已经修补过（包含我们的标记），直接返回
     if grep -q 'SUSFS_FSNOTIFY_COMPAT' "$f"; then
-        echo "[*] pkg_observer.c already patched for kernel < 5.9"
+        echo "[*] pkg_observer.c already patched"
         return 0
     fi
 
-    # 用 #if 0 包裹 fsnotify_ops 定义，使其在旧内核上不被编译
-    # 同时把 ksu_handle_inode_event 也标记为 unused，避免 -Wunused 报错
     python3 - "$f" <<'PYEOF'
-import sys, re
+import sys
 path = sys.argv[1]
 src = open(path).read()
 
-# 1. 找到 fsnotify_ops 的定义，用 #if 0 ... #endif 包裹
-#    典型形式：static const struct fsnotify_ops fsnotify_ops = { ... };
-pattern = r'(static\s+const\s+struct\s+fsnotify_ops\s+\w+\s*=\s*\{.*?\};)'
-def wrap_ops(m):
-    return "/* SUSFS_FSNOTIFY_COMPAT: kernel < 5.9 lacks handle_inode_event */\n#if 0\n" + m.group(1) + "\n#endif"
-new_src, n = re.subn(pattern, wrap_ops, src, count=1, flags=re.S)
-if n == 0:
-    print("[-] Could not locate fsnotify_ops definition; aborting", file=sys.stderr)
-    sys.exit(1)
+# 确保能拿到 LINUX_VERSION_CODE
+if '#include <linux/version.h>' not in src:
+    src = '#include <linux/version.h>\n' + src
 
-# 2. 给 ksu_handle_inode_event 加上 __maybe_unused，避免未使用警告
-new_src = re.sub(
-    r'(int\s+ksu_handle_inode_event\s*\()',
-    r'__maybe_unused \1',
-    new_src, count=1
+# 找到最后一个 #include 行的位置，作为 #if 的插入点
+lines = src.split('\n')
+insert_pos = 0
+for i, line in enumerate(lines):
+    if line.lstrip().startswith('#include'):
+        insert_pos = i + 1
+
+guard_open = (
+    "/* SUSFS_FSNOTIFY_COMPAT: kernel < 5.9 lacks handle_inode_event */\n"
+    "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)"
 )
+lines.insert(insert_pos, guard_open)
 
-open(path, 'w').write(new_src)
-print("[+] Wrapped fsnotify_ops in #if 0 and marked ksu_handle_inode_event unused")
+body = '\n'.join(lines)
+
+tail = """
+
+#else /* LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0) */
+/* SUSFS_FSNOTIFY_COMPAT: pkg_observer disabled on pre-5.9 kernels.
+ * handle_inode_event does not exist there and handle_event has a different
+ * (incompatible) signature. Stub the public entry points so callers link.
+ */
+int ksu_start_pkg_monitor(void) { return 0; }
+void ksu_stop_pkg_monitor(void) { }
+#endif /* SUSFS_FSNOTIFY_COMPAT */
+"""
+open(path, 'w').write(body.rstrip() + tail)
+print("[+] Wrapped pkg_observer.c for kernel < 5.9 and added stubs")
 PYEOF
 
-    if [ $? -eq 0 ]; then
-        echo "[+] pkg_observer.c patched for kernel $kver"
-    else
+    if [ $? -ne 0 ]; then
         echo "[-] Failed to patch pkg_observer.c"
         return 1
     fi
+    echo "[+] pkg_observer.c patched for kernel $kver"
 }
-
-fix_sukisu_fsnotify_compat

@@ -76,65 +76,33 @@ fix_sukisu_pgtable_include
 # handle_inode_event 是 Linux 5.9+ 的 fsnotify_ops 字段，5.4 只有 handle_event
 # 且两者签名互不兼容。在 <5.9 上整文件禁用 pkg_observer，只留空 stub。
 fix_sukisu_fsnotify_compat() {
-    local kver
+    local kver f
     kver=$(sed -nE 's/^VERSION[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' Makefile | head -1).\
 $(sed -nE 's/^PATCHLEVEL[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' Makefile | head -1)
+    [ "$(printf '%s\n' 5.9 "$kver" | sort -V | head -1)" = 5.9 ] && { echo "[*] $kver >= 5.9, skip"; return 0; }
 
-    if [ "$(printf '%s\n' "5.9" "$kver" | sort -V | head -1)" != "5.9" ]; then
-        echo "[*] Kernel $kver >= 5.9, skipping fsnotify fix"
-        return 0
-    fi
-
-    local f="${KERNEL_DIR}/drivers/kernelsu/manager/pkg_observer.c"
-    [ -f "$f" ] || { echo "[-] pkg_observer.c not found"; return 0; }
-
-    if grep -q 'SUSFS_FSNOTIFY_COMPAT' "$f"; then
-        echo "[*] pkg_observer.c already patched"
-        return 0
-    fi
+    f="${KERNEL_DIR}/drivers/kernelsu/manager/pkg_observer.c"
+    [ -f "$f" ] || { echo "[-] not found"; return 0; }
+    grep -q SUSFS_FSNOTIFY_COMPAT "$f" && { echo "[*] already patched"; return 0; }
 
     python3 - "$f" <<'PYEOF'
-import sys
-path = sys.argv[1]
-src = open(path).read()
-
-# 确保能拿到 LINUX_VERSION_CODE
-if '#include <linux/version.h>' not in src:
-    src = '#include <linux/version.h>\n' + src
-
-# 找到最后一个 #include 行的位置，作为 #if 的插入点
-lines = src.split('\n')
-insert_pos = 0
-for i, line in enumerate(lines):
-    if line.lstrip().startswith('#include'):
-        insert_pos = i + 1
-
-guard_open = (
-    "/* SUSFS_FSNOTIFY_COMPAT: kernel < 5.9 lacks handle_inode_event */\n"
-    "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)"
-)
-lines.insert(insert_pos, guard_open)
-
-body = '\n'.join(lines)
-
-tail = """
+import sys, re
+p = sys.argv[1]
+s = open(p).read()
+if '#include <linux/version.h>' not in s:
+    s = '#include <linux/version.h>\n' + s
+lines = s.split('\n')
+pos = max([i for i, l in enumerate(lines) if l.lstrip().startswith('#include')] or [0]) + 1
+lines.insert(pos, '/* SUSFS_FSNOTIFY_COMPAT */\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)')
+s = '\n'.join(lines).rstrip() + """
 
 #else /* LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0) */
-/* SUSFS_FSNOTIFY_COMPAT: pkg_observer disabled on pre-5.9 kernels.
- * handle_inode_event does not exist there and handle_event has a different
- * (incompatible) signature. Stub the public entry points so callers link.
- */
 int ksu_start_pkg_monitor(void) { return 0; }
 void ksu_stop_pkg_monitor(void) { }
 #endif /* SUSFS_FSNOTIFY_COMPAT */
 """
-open(path, 'w').write(body.rstrip() + tail)
-print("[+] Wrapped pkg_observer.c for kernel < 5.9 and added stubs")
+open(p, 'w').write(s)
+print('[+] wrapped with version guard')
 PYEOF
-
-    if [ $? -ne 0 ]; then
-        echo "[-] Failed to patch pkg_observer.c"
-        return 1
-    fi
-    echo "[+] pkg_observer.c patched for kernel $kver"
+    echo "[+] pkg_observer.c patched for $kver"
 }

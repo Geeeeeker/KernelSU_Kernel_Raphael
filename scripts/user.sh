@@ -37,3 +37,35 @@ EOF
 else
   echo "rtl8188eus: Makefile not found, skip warning suppression"
 fi
+
+
+# ========== 修复 SukiSU-Ultra 在 5.4 内核上缺失 linux/pgtable.h ==========
+# 背景：linux/pgtable.h 从 5.8 才独立拆分，5.4 只有 asm/pgtable.h。
+#       sucompat.c 直接 include 前者会 fatal error。
+# 替换策略：在整个 kernelsu 树里，凡是 include <linux/pgtable.h> 的，
+#           一律改成 <asm/pgtable.h>，兼容 5.4 与之后的树。
+fix_sukisu_pgtable_include() {
+    local root="${KERNEL_DIR}/drivers/kernelsu"
+    if [ ! -e "$root" ]; then
+        echo "[-] ${root} not present; skipping pgtable fix (KSU not installed?)"
+        return 0
+    fi
+
+    local count=0 f
+    # grep -l 会跟随 symlink；显式遍历所有 .c/.h 更保险
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        sed -i 's|#include <linux/pgtable.h>|#include <asm/pgtable.h>|' "$f"
+        count=$((count + 1))
+        echo "[+] Replaced linux/pgtable.h -> asm/pgtable.h in ${f#"$KERNEL_DIR"/}"
+    done < <(grep -rIl --include='*.c' --include='*.h' \
+                  '#include <linux/pgtable.h>' "$root" 2>/dev/null)
+
+    if [ "$count" -eq 0 ]; then
+        echo "[*] No '#include <linux/pgtable.h>' found under drivers/kernelsu"
+    else
+        echo "[+] pgtable fix applied to ${count} file(s)"
+    fi
+}
+
+fix_sukisu_pgtable_include

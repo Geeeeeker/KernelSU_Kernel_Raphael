@@ -224,6 +224,38 @@ apply_resukisu_susfs() {
 		die "SUSFS kernel patch failed; see ${patch_log}"
 	fi
 	ok "50_add_susfs_in_kernel-5.4.patch applied"
+		# --- 手动补充 SUSFS/ReSukiSU 缺失的 setresuid 钩子 ---
+	local sys_c="${kernel_dir}/kernel/sys.c"
+	if [ -f "$sys_c" ] && ! grep -q 'ksu_handle_setresuid' "$sys_c"; then
+		warn "setresuid hook missing, attempting to inject..."
+		python3 - "$sys_c" <<'PY'
+import sys, re
+path = sys.argv[1]
+s = open(path).read()
+
+# 匹配 setresuid 函数定义
+pat = re.compile(r'(SYSCALL_DEFINE3\(setresuid,\s*uid_t,\s*ruid,\s*uid_t,\s*euid,\s*uid_t,\s*suid\)\s*\{)', re.S)
+m = pat.search(s)
+if not m:
+    sys.exit('setresuid syscall definition not found')
+
+# 在函数开始处插入钩子调用
+hook = '''
+#ifdef CONFIG_KSU
+	{
+		extern int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid);
+		ksu_handle_setresuid(ruid, euid);
+	}
+#endif
+'''
+s = s[:m.end()] + hook + s[m.end():]
+open(path, 'w').write(s)
+print("Injected ksu_handle_setresuid hook into kernel/sys.c")
+PY
+		ok "setresuid hook injected"
+	else
+		info "setresuid hook already present or kernel/sys.c not found"
+	fi
 	rm -f "$patch_log"
 
 	info "skipping 10_enable_susfs_for_ksu.patch (obsolete for modern KSU forks)"

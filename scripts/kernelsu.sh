@@ -24,6 +24,9 @@ set -euo pipefail
 
 KERNEL_DIR=${KERNEL_DIR:?KERNEL_DIR must point at the kernel source tree}
 
+# This tree's defconfig is known and fixed; no searching required.
+KERNEL_DEFCONFIG_REL="arch/arm64/configs/raphael_defconfig"
+
 # ------------------------------------------------------------- registry -----
 #
 # Fields, '|'-separated:
@@ -34,8 +37,6 @@ KERNEL_DIR=${KERNEL_DIR:?KERNEL_DIR must point at the kernel source tree}
 #   5 default ref for legacy (< 5.10) kernels
 #   6 refs that already contain SUSFS support (space separated; '-' for none)
 #   7 human-readable name
-#
-# Verified against each repo's live branch/tag list on 2026-07-27.
 
 ksu_registry() {
 	case "$1" in
@@ -44,12 +45,9 @@ ksu_registry() {
 	kernelsu-next)
 		echo "https://github.com/KernelSU-Next/KernelSU-Next|dev|KernelSU-Next|dev|legacy|-|KernelSU-Next" ;;
 	sukisu-ultra)
-		# 'main' is the modular v4 tree (KPM, no SUSFS); 'builtin' is the
-		# non-GKI/source-integrated tree and is the only one with SUSFS Kconfig.
 		echo "https://github.com/SukiSU-Ultra/SukiSU-Ultra|main|KernelSU|main|builtin|builtin|SukiSU-Ultra" ;;
 	resukisu)
-		# Re-fork of SukiSU-Ultra aimed at legacy/non-GKI kernels.
-		# SUSFS is NOT bundled; the kernel-side patch is applied by
+		# SUSFS is NOT bundled. Kernel-side patch applied by
 		# apply_resukisu_susfs() below. The KernelSU-side 10_ patch is
 		# deliberately skipped: it targets the old flat KSU layout.
 		echo "https://github.com/ReSukiSU/ReSukiSU|main|KernelSU|main|main|kernel-patch|ReSukiSU" ;;
@@ -79,7 +77,6 @@ ksu_install() {
 	group "Installing ${name}"
 	info "repository: ${repo}"
 
-	# Decide which ref to check out.
 	local kver ref=$requested_ref
 	kver=$(kernel_version "$KERNEL_DIR" || echo "0.0")
 	if [ -z "$ref" ]; then
@@ -91,7 +88,6 @@ ksu_install() {
 		fi
 	fi
 
-	# Validate before handing the ref to setup.sh, which would swallow a typo.
 	if [ -n "$ref" ]; then
 		info "validating ref '${ref}' exists in ${repo}"
 		ref_exists "$repo" "$ref" \
@@ -109,7 +105,6 @@ ksu_install() {
 		warn "Pin KSU_REF (e.g. a tag) if you need reproducible builds."
 	fi
 
-	# Run the variant's own installer.
 	local setup_url="https://raw.githubusercontent.com/${repo#https://github.com/}/${setup_ref}/kernel/setup.sh"
 	info "running ${setup_url}"
 	(
@@ -121,7 +116,6 @@ ksu_install() {
 		fi
 	) || die "${name} setup.sh failed"
 
-	# --- verify the installer actually did what it claims ------------------
 	local ksu_dir="${KERNEL_DIR}/${dir}"
 	[ -d "$ksu_dir" ] || die "${name} setup.sh finished but ${dir}/ is missing"
 
@@ -144,7 +138,6 @@ ksu_install() {
 	grep -q 'drivers/kernelsu/Kconfig' "${KERNEL_DIR}/drivers/Kconfig" \
 		|| die "drivers/Kconfig was not wired up for kernelsu"
 
-	# Confirm we landed on the ref we asked for, catching the silent fallback.
 	local head_desc head_sha
 	head_sha=$(git -C "$ksu_dir" rev-parse --short HEAD)
 	head_desc=$(git -C "$ksu_dir" describe --tags --always 2>/dev/null || echo "$head_sha")
@@ -157,7 +150,6 @@ ksu_install() {
 	fi
 	ok "${name} installed at ${head_desc} (${head_sha})"
 
-	# --- publish facts the later steps need --------------------------------
 	local count version_label
 	count=$(git -C "$ksu_dir" rev-list --count HEAD 2>/dev/null || echo 0)
 	if git -C "$ksu_dir" describe --exact-match --tags >/dev/null 2>&1; then
@@ -176,7 +168,6 @@ ksu_install() {
 
 	ksu_resolve_hook_mode "${KSU_HOOK_MODE:-auto}" "$kver"
 
-	# --- SUSFS kernel-side integration for ReSukiSU ------------------------
 	if [ "$variant" = "resukisu" ] && [ "$susfs_refs" = "kernel-patch" ]; then
 		apply_resukisu_susfs "$KERNEL_DIR" "$kver"
 	fi
@@ -188,22 +179,12 @@ ksu_install() {
 }
 
 # --------------------------------------------------- ReSukiSU SUSFS patch ---
-#
-# ReSukiSU does not bundle SUSFS. For non-GKI kernels, the supported path is
-# the kernel-side patch 50_add_susfs_in_kernel-<ver>.patch from susfs4ksu. The
-# companion KernelSU-side patch 10_enable_susfs_for_ksu.patch is intentionally
-# NOT applied: it targets KernelSU's old flat source layout and will always
-# reject against modern forks such as ReSukiSU. ReSukiSU handles the KSU-side
-# SUSFS plumbing itself via CONFIG_KSU_SUSFS.
+
 apply_resukisu_susfs() {
 	local kernel_dir=$1 kver=$2
 
 	group "Applying SUSFS kernel patches for ReSukiSU (kernel ${kver})"
 
-	# susfs4ksu ref: the 1.4.2-kernel-5.4 tag is the last non-GKI 5.4 snapshot
-	# and the only 5.4 ref whose kernel-side patch is known to apply cleanly
-	# against vendor QGKI trees like Raphael's. Override via SUSFS_REF if a
-	# newer fork is verified.
 	local SUSFS_REPO=${SUSFS_REPO:-"https://github.com/simonpunk/susfs4ksu.git"}
 	local SUSFS_REF=${SUSFS_REF:-"1.4.2-kernel-5.4"}
 
@@ -217,7 +198,6 @@ apply_resukisu_susfs() {
 	fi
 	ok "SUSFS source cloned"
 
-	# Step 1: copy the SUSFS core source files into the kernel tree.
 	local copied=0
 	local f src dst
 	for f in fs/susfs.c fs/sus_su.c include/linux/susfs.h include/linux/sus_su.h include/linux/susfs_def.h; do
@@ -232,10 +212,6 @@ apply_resukisu_susfs() {
 	[ "$copied" -ge 2 ] || { rm -rf "$susfs_tmp"; die "no SUSFS source files found under ${susfs_tmp}/kernel_patches"; }
 	ok "copied ${copied} SUSFS source files into kernel tree"
 
-	# Step 2: apply the kernel-side patch. This wires fs/Makefile, fs/Kconfig
-	# and inserts the SUSFS hooks into fs/open.c, fs/stat.c, fs/read_write.c,
-	# fs/exec.c, kernel/sys.c, kernel/reboot.c, drivers/input/input.c,
-	# security/selinux/hooks.c, etc.
 	local patch="${susfs_tmp}/kernel_patches/50_add_susfs_in_kernel-5.4.patch"
 	[ -f "$patch" ] || { rm -rf "$susfs_tmp"; die "kernel-side patch missing: $patch"; }
 
@@ -250,15 +226,16 @@ apply_resukisu_susfs() {
 	ok "50_add_susfs_in_kernel-5.4.patch applied"
 	rm -f "$patch_log"
 
-	# Step 3: deliberately skip 10_enable_susfs_for_ksu.patch.
 	info "skipping 10_enable_susfs_for_ksu.patch (obsolete for modern KSU forks)"
 
-	# Step 4: ensure the top-level Kconfig symbol is selectable in defconfig.
-	local defconfig
-	defconfig=$(kernel_defconfig "$kernel_dir") || { rm -rf "$susfs_tmp"; die "could not locate kernel defconfig"; }
+	# Fixed defconfig path for this tree.
+	local defconfig="${kernel_dir}/${KERNEL_DEFCONFIG_REL}"
+	if [ ! -f "$defconfig" ]; then
+		rm -rf "$susfs_tmp"
+		die "defconfig not found at ${defconfig}"
+	fi
+	ok "using defconfig: ${defconfig}"
 
-	# 50 patch normally appends CONFIG_KSU_SUSFS to fs/Kconfig. If a vendor
-	# tree resisted it, insert a minimal menu block ourselves.
 	if ! grep -q 'config KSU_SUSFS' "${kernel_dir}/fs/Kconfig"; then
 		warn "fs/Kconfig missing KSU_SUSFS entries; inserting minimal block"
 		python3 - "$kernel_dir/fs/Kconfig" <<'PY'
@@ -386,7 +363,6 @@ ksu_hook_configs() {
 	esac
 }
 
-# Only run the installer when sourced as a script entry point.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 	ksu_install "${KSU_VARIANT:-none}" "${KSU_REF:-}"
 fi

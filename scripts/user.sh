@@ -139,3 +139,57 @@ if [ -f "$ALLOWLIST" ]; then
 else
     echo "[-] allowlist.c not found at $ALLOWLIST"
 fi
+
+# ========== 修复 cpu_spoof.c 在 5.4 内核上 vdso_clock_mode 缺失 ==========
+# vdso_clock_mode 是 Linux 5.7/5.8 才加入 struct clocksource 的成员。
+# 在 5.4 上，把引用该成员的代码段用版本宏包裹，旧内核直接跳过。
+fix_cpu_spoof_for_54() {
+    local f="${KERNEL_DIR}/drivers/kernelsu/extension/cpu_spoof.c"
+    if [ ! -f "$f" ]; then
+        echo "[-] cpu_spoof.c not found at $f; skipping"
+        return 0
+    fi
+
+    if grep -q 'SUSFS_CPU_SPOOF_COMPAT' "$f"; then
+        echo "[*] cpu_spoof.c already patched"
+        return 0
+    fi
+
+    python3 - "$f" <<'PY'
+import sys, re
+path = sys.argv[1]
+src = open(path).read()
+
+# 匹配包含 vdso_clock_mode 的赋值语句块。典型形式：
+#   (*curr_cs_ptr)->vdso_clock_mode = ...;
+# 也可能跨多行。用正则找到该语句，并用 #if 包裹。
+pattern = r'(\s*\(\*curr_cs_ptr\)->vdso_clock_mode\s*=[^;]*;)'
+match = re.search(pattern, src, flags=re.S)
+if not match:
+    print('[-] Could not locate vdso_clock_mode assignment; aborting', file=sys.stderr)
+    sys.exit(1)
+
+block = match.group(1)
+wrapped = (
+    '\n/* SUSFS_CPU_SPOOF_COMPAT: vdso_clock_mode is 5.7+ */\n'
+    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)\n'
+    + block +
+    '\n#endif /* SUSFS_CPU_SPOOF_COMPAT */\n'
+)
+
+# 确保 LINUX_VERSION_CODE 可用
+if '#include <linux/version.h>' not in src:
+    src = '#include <linux/version.h>\n' + src
+
+src = src.replace(block, wrapped, 1)
+open(path, 'w').write(src)
+print('[+] cpu_spoof.c patched: wrapped vdso_clock_mode in #if 5.7+')
+PY
+
+    if grep -q 'SUSFS_CPU_SPOOF_COMPAT' "$f"; then
+        echo "[+] cpu_spoof.c verified"
+    else
+        echo "[-] FAIL: cpu_spoof.c patch not applied"
+        return 1
+    fi
+}

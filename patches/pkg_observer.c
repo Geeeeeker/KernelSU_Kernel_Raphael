@@ -4,24 +4,14 @@
  *
  * Self-contained replacement for drivers/kernelsu/manager/pkg_observer.c.
  *
- * Why this file exists:
- *   - The builtin branch of SukiSU-Ultra ships an older pkg_observer.c that
- *     unconditionally uses fsnotify_ops.handle_inode_event. That field only
- *     exists on Linux >= 5.9; on 5.4 the field is absent and its handle_event
- *     counterpart has an incompatible signature, so the original does not
- *     compile.
- *   - The builtin branch also lacks pkg_observer_defs.h, which the newer
- *     pkg_observer.c includes. So we cannot just copy upstream's newer file.
- *
- * This version:
- *   - includes nothing from KSU's private headers except klog.h,
- *     throne_tracker.h, and runtime/ksud_boot.h (all present in builtin),
- *   - expands KSU_DECL_FSNOTIFY_OPS manually into a #if 5.9 split,
- *   - uses file_name->len / file_name->name instead of ksu_fname_* macros,
- *   - weak-stubs track_throne() and ksu_set_ksud_present() so linking
- *     succeeds even if the builtin branch does not define them.
- *
- * Tested: 4.9 / 4.14 / 4.19 / 5.4 / 5.10 / 5.15.
+ * See commit message / workflow comment for the full rationale. Short version:
+ *   - builtin's pkg_observer.c uses fsnotify_ops.handle_inode_event, a 5.9+
+ *     field, and lacks pkg_observer_defs.h, so it cannot compile on 5.4.
+ *   - this file expands the version splits manually and does not include any
+ *     private KSU headers except the three that builtin actually ships.
+ *   - ksu_set_ksud_present() / track_throne() may not be declared in the
+ *     builtin headers, so prototypes are provided locally and weak bodies
+ *     prevent link errors if nothing else defines them.
  */
 
 #include <linux/module.h>
@@ -38,6 +28,17 @@
 
 #define MASK_SYSTEM (FS_CREATE | FS_MOVE | FS_EVENT_ON_CHILD)
 #define MASK_ADB    (FS_CLOSE_WRITE | FS_MOVE | FS_DELETE | FS_EVENT_ON_CHILD)
+
+/*
+ * Local prototypes.
+ *
+ * runtime/ksud_boot.h in the builtin branch does not declare
+ * ksu_set_ksud_present(), so calls below would be implicit int and then
+ * conflict with the weak void definition at end of file. Declaring both here
+ * keeps the compiler happy regardless of what the builtin headers provide.
+ */
+extern void ksu_set_ksud_present(bool present);
+extern void track_throne(bool force);
 
 struct watch_dir {
 	const char *path;
@@ -84,7 +85,7 @@ static int ksu_handle_event(struct fsnotify_group *group,
 	return 0;
 }
 
-/* ---- fsnotify_ops: pick the field this kernel actually has --------------- */
+/* ---- fsnotify_ops -------------------------------------------------------- */
 
 static const struct fsnotify_ops ksu_ops = {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
@@ -205,8 +206,11 @@ void __exit ksu_observer_exit(void)
 }
 
 /* ---- weak fallbacks ------------------------------------------------------ */
-/* If the builtin branch does not define these, weak symbols let the link
- * succeed. If it does define them, the strong definition wins. */
+/*
+ * If builtin defines these elsewhere (strong), these weak bodies are ignored.
+ * If not, they satisfy the linker with no-ops. Signatures must match the
+ * prototypes declared at the top of this file.
+ */
 
-__attribute__((weak)) void track_throne(bool force)          { (void)force; }
+__attribute__((weak)) void track_throne(bool force)           { (void)force; }
 __attribute__((weak)) void ksu_set_ksud_present(bool present) { (void)present; }

@@ -117,29 +117,6 @@ EOF
     fi
 }
 
-# ============================================================
-# 执行
-# ============================================================
-fix_sukisu_pgtable_include
-fix_allowlist_for_54
-install_rtl8188eus
-
-# ============================================================
-# 4. 打印 allowlist.c 全文，便于在 CI 日志中核对
-# ============================================================
-ALLOWLIST="${KERNEL_DIR}/drivers/kernelsu/policy/allowlist.c"
-if [ -f "$ALLOWLIST" ]; then
-    echo "============================================================"
-    echo " BEGIN allowlist.c ($(wc -l < "$ALLOWLIST") lines)"
-    echo "============================================================"
-    cat -n "$ALLOWLIST"
-    echo "============================================================"
-    echo " END allowlist.c"
-    echo "============================================================"
-else
-    echo "[-] allowlist.c not found at $ALLOWLIST"
-fi
-
 # ========== 修复 cpu_spoof.c 在 5.4 内核上 vdso_clock_mode 缺失 ==========
 # vdso_clock_mode 是 Linux 5.7/5.8 才加入 struct clocksource 的成员。
 # 在 5.4 上，把引用该成员的代码段用版本宏包裹，旧内核直接跳过。
@@ -193,3 +170,28 @@ PY
         return 1
     fi
 }
+
+
+# ============================================================
+# 执行
+# ============================================================
+fix_sukisu_pgtable_include
+fix_allowlist_for_54
+install_rtl8188eus
+fix_cpu_spoof_for_54
+
+# ============================================================
+# 4. 打印 allowlist.c 全文，便于在 CI 日志中核对
+# ============================================================
+ALLOWLIST="${KERNEL_DIR}/drivers/kernelsu/policy/allowlist.c"
+if [ -f "$ALLOWLIST" ]; then
+    echo "============================================================"
+    echo " BEGIN allowlist.c ($(wc -l < "$ALLOWLIST") lines)"
+    echo "============================================================"
+    cat -n "$ALLOWLIST"
+    echo "============================================================"
+    echo " END allowlist.c"
+    echo "============================================================"
+else
+    echo "[-] allowlist.c not found at $ALLOWLIST"
+fi

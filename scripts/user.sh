@@ -5,54 +5,17 @@ set -euo pipefail
 KERNEL_DIR=${KERNEL_DIR:?KERNEL_DIR must be set}
 cd "$KERNEL_DIR"
 
-# 3. 添加 rtl8188eus WiFi 驱动（原样）
-git clone --depth=1 --branch master https://github.com/Geeeeeker/android_kernel_xiaomi_sdm845.git rtl8188eus-repo
-if [ -d "rtl8188eus-repo/drivers/rtl8188eus" ]; then
-  cp -r rtl8188eus-repo/drivers/rtl8188eus drivers/
-  echo 'obj-$(CONFIG_RTL8188EU) += rtl8188eus/' >> drivers/Makefile
-  echo 'source "drivers/rtl8188eus/Kconfig"' >> drivers/Kconfig
-else
-
-grep -n 'ksu_handle_stat' fs/stat.c
-  echo "Error: rtl8188eus directory not found"
-  exit 1
-fi
-rm -rf rtl8188eus-repo
-
-# 4. 修复 rtl8188eus 在 clang -Werror 下触发的 -Wparentheses-equality
-#    原因：usb_halinit.c 里 if ((IS_FULL_SPEED_USB(Adapter)) ... 多包了一层括号，
-#    该驱动是第三方老代码，直接对其目录关闭该警告最安全。
-if [ -f drivers/rtl8188eus/Makefile ]; then
-  if ! grep -q 'Wno-parentheses-equality' drivers/rtl8188eus/Makefile; then
-    cat >> drivers/rtl8188eus/Makefile <<'EOF'
-
-# Third-party rtl8188eus driver: silence clang's -Werror=parentheses-equality
-subdir-ccflags-y += -Wno-parentheses-equality
-subdir-ccflags-y += -Wno-error=parentheses-equality
-EOF
-    echo "rtl8188eus: appended -Wno-parentheses-equality to Makefile"
-  else
-    echo "rtl8188eus: -Wno-parentheses-equality already present"
-  fi
-else
-  echo "rtl8188eus: Makefile not found, skip warning suppression"
-fi
-
-
-# ========== 修复 SukiSU-Ultra 在 5.4 内核上缺失 linux/pgtable.h ==========
-# 背景：linux/pgtable.h 从 5.8 才独立拆分，5.4 只有 asm/pgtable.h。
-#       sucompat.c 直接 include 前者会 fatal error。
-# 替换策略：在整个 kernelsu 树里，凡是 include <linux/pgtable.h> 的，
-#           一律改成 <asm/pgtable.h>，兼容 5.4 与之后的树。
+# ============================================================
+# 1. 修复 SukiSU-Ultra 在 5.4 内核上缺失 linux/pgtable.h
+# ============================================================
 fix_sukisu_pgtable_include() {
     local root="${KERNEL_DIR}/drivers/kernelsu"
     if [ ! -e "$root" ]; then
-        echo "[-] ${root} not present; skipping pgtable fix (KSU not installed?)"
+        echo "[-] ${root} not present; skipping pgtable fix"
         return 0
     fi
 
     local count=0 f
-    # grep -l 会跟随 symlink；显式遍历所有 .c/.h 更保险
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         sed -i 's|#include <linux/pgtable.h>|#include <asm/pgtable.h>|' "$f"
@@ -68,252 +31,111 @@ fix_sukisu_pgtable_include() {
     fi
 }
 
-fix_sukisu_pgtable_include
-
-
-
-# ========== 修复 SukiSU-Ultra 在 5.4 内核上 fsnotify_ops 不兼容 ==========
-# 背景：
-#   1) handle_inode_event 是 5.9+ 的 fsnotify_ops 字段，5.4 只有 handle_event；
-#   2) 上游 KSU_DECL_FSNOTIFY_OPS 宏无条件展开成 handle_inode_event 的签名，
-#      即便把字段名换成 .handle_event，签名仍然不匹配 → 必须自己定义
-#      一个 handle_event 签名的函数（仅 5.4 及以下）；
-#   3) 用带 LINUX_VERSION_CODE 守卫的整文件覆写最稳。
-fix_sukisu_fsnotify_compat() {
-    local f="${KERNEL_DIR}/drivers/kernelsu/manager/pkg_observer.c"
-    [ -f "$f" ] || { echo "[-] pkg_observer.c not found at $f"; return 0; }
-
-    # 只认我们自己的 marker，避免上游偶然出现的版本字符串误判“已修复”
-    if grep -q 'SUSFS_FSNOTIFY_COMPAT_V2' "$f"; then
-        echo "[*] pkg_observer.c already replaced (V2), skipping"
+# ============================================================
+# 2. 修复 SukiSU-Ultra 在 5.4 内核上 allowlist.c 的 API 差异
+#    - TWA_RESUME 是 5.7+ 才有的 task_work_add 第三参数 → 改成 true
+#    - put_task_struct 在 5.4 需要 <linux/sched/task.h>
+#    幂等：重复运行不会二次修改
+# ============================================================
+fix_allowlist_for_54() {
+    local f="${KERNEL_DIR}/drivers/kernelsu/policy/allowlist.c"
+    if [ ! -f "$f" ]; then
+        echo "[-] allowlist.c not found at $f; skipping"
         return 0
     fi
 
-    # 只有仍存在未加守卫的 .handle_inode_event 才需要覆写
-    if ! grep -q '\.handle_inode_event[[:space:]]*=[[:space:]]*ksu_handle_inode_event' "$f"; then
-        echo "[*] pkg_observer.c has no unguarded .handle_inode_event, skipping"
-        return 0
-    fi
+    python3 - "$f" <<'PY'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+changed = []
 
-    cp "$f" "${f}.orig"
+# (a) <linux/sched/task.h> — 5.4 的 <linux/sched.h> 不含 put_task_struct 原型
+if '#include <linux/sched/task.h>' not in src:
+    if '#include <linux/sched.h>' in src:
+        src = src.replace('#include <linux/sched.h>',
+                          '#include <linux/sched.h>\n#include <linux/sched/task.h>', 1)
+        changed.append('include sched/task.h')
+    else:
+        src = '#include <linux/sched/task.h>\n' + src
+        changed.append('prepend sched/task.h')
 
-    cat > "$f" <<'PKG_EOF'
-// SPDX-License-Identifier: GPL-2.0
-/* SUSFS_FSNOTIFY_COMPAT_V2: pre-5.9 compatible version */
-#include <linux/module.h>
-#include <linux/fs.h>
-#include <linux/namei.h>
-#include <linux/fsnotify_backend.h>
-#include <linux/slab.h>
-#include <linux/rculist.h>
-#include <linux/version.h>
-#include "klog.h"
-#include "throne_tracker.h"
-#include "runtime/ksud_boot.h"
+# (b) TWA_RESUME (5.7+) -> true (5.4 的 bool 参数)
+if 'TWA_RESUME' in src:
+    src = src.replace('TWA_RESUME', 'true')
+    changed.append('TWA_RESUME -> true')
 
-#define MASK_SYSTEM (FS_CREATE | FS_MOVE | FS_EVENT_ON_CHILD)
-#define MASK_ADB (FS_CLOSE_WRITE | FS_MOVE | FS_DELETE | FS_EVENT_ON_CHILD)
+if changed:
+    open(path, 'w').write(src)
+    print('[+] allowlist.c patched: ' + ', '.join(changed))
+else:
+    print('[*] allowlist.c already compatible')
+PY
 
-struct watch_dir {
-	const char *path;
-	u32 mask;
-	struct path kpath;
-	struct inode *inode;
-	struct fsnotify_mark *mark;
-};
-
-static struct fsnotify_group *g;
-
-#include "pkg_observer_defs.h"
-
-/* 共享业务逻辑：只依赖 mask + file_name */
-static int ksu_pkg_observer_common(u32 mask, const struct qstr *file_name)
-{
-	if (!file_name)
-		return 0;
-	if (mask & FS_ISDIR)
-		return 0;
-	if (ksu_fname_len(file_name) == 13 &&
-	    !memcmp(ksu_fname_arg(file_name), "packages.list", 13)) {
-		pr_info("packages.list detected: %d\n", mask);
-		track_throne(false);
-	}
-	if (ksu_fname_len(file_name) == 4 &&
-	    !memcmp(ksu_fname_arg(file_name), "ksud", 4)) {
-		if (mask & (FS_CLOSE_WRITE | FS_MOVED_TO))
-			ksu_set_ksud_present(true);
-		else if (mask & (FS_DELETE | FS_MOVED_FROM))
-			ksu_set_ksud_present(false);
-	}
-	return 0;
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
-/* 5.9+：handle_inode_event 签名 */
-static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask,
-				  struct inode *inode, struct inode *dir,
-				  const struct qstr *file_name, u32 cookie)
-{
-	return ksu_pkg_observer_common(mask, file_name);
-}
-#else
-/* <=5.8：handle_event 签名 */
-static int ksu_handle_event(struct fsnotify_group *group,
-			    struct inode *inode, u32 mask,
-			    const void *data, int data_type,
-			    const struct qstr *file_name, u32 cookie,
-			    struct fsnotify_iter_info *iter_info)
-{
-	return ksu_pkg_observer_common(mask, file_name);
-}
-#endif
-
-static const struct fsnotify_ops ksu_ops = {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
-	.handle_inode_event = ksu_handle_inode_event,
-#else
-	.handle_event = ksu_handle_event,
-#endif
-};
-
-static void __maybe_unused m_free(struct fsnotify_mark *m)
-{
-	if (m)
-		kfree(m);
-}
-
-static int add_mark_on_inode(struct inode *inode, u32 mask,
-			     struct fsnotify_mark **out)
-{
-	struct fsnotify_mark *m;
-	int ret;
-
-	m = kzalloc(sizeof(*m), GFP_KERNEL);
-	if (!m)
-		return -ENOMEM;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
-	fsnotify_init_mark(m, g);
-	m->mask = mask;
-	ret = fsnotify_add_inode_mark(m, inode, 0);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
-	fsnotify_init_mark(m, g);
-	m->mask = mask;
-	ret = fsnotify_add_mark(m, inode, NULL, 0);
-#else
-	fsnotify_init_mark(m, m_free);
-	m->mask = mask;
-	ret = fsnotify_add_mark(m, g, inode, NULL, 0);
-#endif
-
-	if (ret) {
-		fsnotify_put_mark(m);
-		return -EINVAL;
-	}
-	*out = m;
-	return 0;
-}
-
-static int watch_one_dir(struct watch_dir *wd)
-{
-	int ret = kern_path(wd->path, LOOKUP_FOLLOW, &wd->kpath);
-	if (ret) {
-		pr_info("path not ready: %s (%d)\n", wd->path, ret);
-		return ret;
-	}
-	wd->inode = d_inode(wd->kpath.dentry);
-	ihold(wd->inode);
-
-	ret = add_mark_on_inode(wd->inode, wd->mask, &wd->mark);
-	if (ret) {
-		pr_err("Add mark failed for %s (%d)\n", wd->path, ret);
-		path_put(&wd->kpath);
-		iput(wd->inode);
-		wd->inode = NULL;
-		return ret;
-	}
-	pr_info("watching %s\n", wd->path);
-	return 0;
-}
-
-static void unwatch_one_dir(struct watch_dir *wd)
-{
-	if (wd->mark) {
-		fsnotify_destroy_mark(wd->mark, g);
-		fsnotify_put_mark(wd->mark);
-		wd->mark = NULL;
-	}
-	if (wd->inode) {
-		iput(wd->inode);
-		wd->inode = NULL;
-	}
-	if (wd->kpath.dentry) {
-		path_put(&wd->kpath);
-		memset(&wd->kpath, 0, sizeof(wd->kpath));
-	}
-}
-
-static struct watch_dir g_watch = { .path = "/data/system",
-				    .mask = MASK_SYSTEM };
-static struct watch_dir g_adb_watch = { .path = "/data/adb",
-					.mask = MASK_ADB };
-
-int ksu_observer_init(void)
-{
-	int ret = 0;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
-	g = fsnotify_alloc_group(&ksu_ops, 0);
-#else
-	g = fsnotify_alloc_group(&ksu_ops);
-#endif
-	if (IS_ERR(g))
-		return PTR_ERR(g);
-
-	ret = watch_one_dir(&g_watch);
-	watch_one_dir(&g_adb_watch);
-	pr_info("observer init done\n");
-	return 0;
-}
-
-void __exit ksu_observer_exit(void)
-{
-	unwatch_one_dir(&g_adb_watch);
-	unwatch_one_dir(&g_watch);
-	fsnotify_put_group(g);
-	pr_info("observer exit done\n");
-}
-PKG_EOF
-
-    # 立即验证：marker + 守卫 + 两套函数 + 两套字段引用
-    if grep -q 'SUSFS_FSNOTIFY_COMPAT_V2' "$f" \
-       && grep -q '^#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)' "$f" \
-       && grep -q '\.handle_inode_event = ksu_handle_inode_event' "$f" \
-       && grep -q '\.handle_event = ksu_handle_event' "$f"; then
-        echo "[+] pkg_observer.c replaced (lines: $(wc -l < "$f"))"
-    else
-        echo "[-] Replacement verification failed; restoring backup"
-        mv "${f}.orig" "$f"
+    # 落地校验：TWA_RESUME 必须消失、sched/task.h 必须出现
+    if grep -q 'TWA_RESUME' "$f"; then
+        echo "[-] FAIL: TWA_RESUME still present in allowlist.c"
         return 1
     fi
+    if ! grep -q '#include <linux/sched/task.h>' "$f"; then
+        echo "[-] FAIL: <linux/sched/task.h> not added to allowlist.c"
+        return 1
+    fi
+    echo "[+] allowlist.c verified: TWA_RESUME gone, sched/task.h present"
 }
 
+# ============================================================
+# 3. rtl8188eus WiFi 驱动
+# ============================================================
+install_rtl8188eus() {
+    git clone --depth=1 --branch master \
+        https://github.com/Geeeeeker/android_kernel_xiaomi_sdm845.git rtl8188eus-repo
+    if [ -d "rtl8188eus-repo/drivers/rtl8188eus" ]; then
+        cp -r rtl8188eus-repo/drivers/rtl8188eus drivers/
+        echo 'obj-$(CONFIG_RTL8188EU) += rtl8188eus/' >> drivers/Makefile
+        echo 'source "drivers/rtl8188eus/Kconfig"'      >> drivers/Kconfig
+    else
+        echo "[-] rtl8188eus directory not found"
+        rm -rf rtl8188eus-repo
+        exit 1
+    fi
+    rm -rf rtl8188eus-repo
 
+    # 关闭 clang -Werror=parentheses-equality（第三方老代码）
+    if [ -f drivers/rtl8188eus/Makefile ]; then
+        if ! grep -q 'Wno-parentheses-equality' drivers/rtl8188eus/Makefile; then
+            cat >> drivers/rtl8188eus/Makefile <<'EOF'
 
+# Third-party rtl8188eus driver: silence clang's -Werror=parentheses-equality
+subdir-ccflags-y += -Wno-parentheses-equality
+subdir-ccflags-y += -Wno-error=parentheses-equality
+EOF
+            echo "rtl8188eus: appended -Wno-parentheses-equality"
+        else
+            echo "rtl8188eus: -Wno-parentheses-equality already present"
+        fi
+    fi
+}
 
+# ============================================================
+# 执行
+# ============================================================
+fix_sukisu_pgtable_include
+fix_allowlist_for_54
+install_rtl8188eus
 
-
-# >>> 关键：这里必须调用！<<<
-fix_sukisu_fsnotify_compat
-
-allowlist_file="${KERNEL_DIR}/drivers/kernelsu/policy/allowlist.c"
-
-# 1. 在 <linux/sched.h> 后补充 <linux/sched/task.h> (5.7 之前需要)
-if ! grep -q 'linux/sched/task.h' "$allowlist_file"; then
-    sed -i '/#include <linux\/sched.h>/a #include <linux/sched/task.h>' "$allowlist_file"
-fi
-
-# 2. 将 TWA_RESUME 替换为 5.4 兼容的 true
-if grep -q 'TWA_RESUME' "$allowlist_file"; then
-    sed -i 's/task_work_add(tsk, cb, TWA_RESUME)/task_work_add(tsk, cb, true)/' "$allowlist_file"
+# ============================================================
+# 4. 打印 allowlist.c 全文，便于在 CI 日志中核对
+# ============================================================
+ALLOWLIST="${KERNEL_DIR}/drivers/kernelsu/policy/allowlist.c"
+if [ -f "$ALLOWLIST" ]; then
+    echo "============================================================"
+    echo " BEGIN allowlist.c ($(wc -l < "$ALLOWLIST") lines)"
+    echo "============================================================"
+    cat -n "$ALLOWLIST"
+    echo "============================================================"
+    echo " END allowlist.c"
+    echo "============================================================"
+else
+    echo "[-] allowlist.c not found at $ALLOWLIST"
 fi

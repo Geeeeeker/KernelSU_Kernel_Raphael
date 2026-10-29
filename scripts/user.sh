@@ -75,34 +75,200 @@ fix_sukisu_pgtable_include
 # ========== 修复 SukiSU-Ultra 在 5.4 内核上 fsnotify_ops 不兼容 ==========
 # handle_inode_event 是 Linux 5.9+ 的 fsnotify_ops 字段，5.4 只有 handle_event
 # 且两者签名互不兼容。在 <5.9 上整文件禁用 pkg_observer，只留空 stub。
+# ========== 用兼容 5.4 的版本覆写 SukiSU-Ultra 的 pkg_observer.c ==========
+# 上游 builtin 分支的 pkg_observer.c 是旧版，无条件使用 handle_inode_event
+# （5.9+ 字段）。用带版本判断的新版整文件覆写，天然兼容 5.4。
 fix_sukisu_fsnotify_compat() {
-    local kver f
-    kver=$(sed -nE 's/^VERSION[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' Makefile | head -1).\
-$(sed -nE 's/^PATCHLEVEL[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' Makefile | head -1)
-    [ "$(printf '%s\n' 5.9 "$kver" | sort -V | head -1)" = 5.9 ] && { echo "[*] $kver >= 5.9, skip"; return 0; }
+    local f="${KERNEL_DIR}/drivers/kernelsu/manager/pkg_observer.c"
+    [ -f "$f" ] || { echo "[-] pkg_observer.c not found at $f"; return 0; }
 
-    f="${KERNEL_DIR}/drivers/kernelsu/manager/pkg_observer.c"
-    [ -f "$f" ] || { echo "[-] not found"; return 0; }
-    grep -q SUSFS_FSNOTIFY_COMPAT "$f" && { echo "[*] already patched"; return 0; }
+    # 如果已经有版本判断，说明是新版，什么都不用做
+    if grep -q 'LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)' "$f"; then
+        echo "[*] pkg_observer.c already has 5.9 guard, skipping"
+        return 0
+    fi
 
-    python3 - "$f" <<'PYEOF'
-import sys, re
-p = sys.argv[1]
-s = open(p).read()
-if '#include <linux/version.h>' not in s:
-    s = '#include <linux/version.h>\n' + s
-lines = s.split('\n')
-pos = max([i for i, l in enumerate(lines) if l.lstrip().startswith('#include')] or [0]) + 1
-lines.insert(pos, '/* SUSFS_FSNOTIFY_COMPAT */\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)')
-s = '\n'.join(lines).rstrip() + """
+    if grep -q 'SUSFS_FSNOTIFY_COMPAT_V2' "$f"; then
+        echo "[*] pkg_observer.c already replaced with V2"
+        return 0
+    fi
 
-#else /* LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0) */
-int ksu_start_pkg_monitor(void) { return 0; }
-void ksu_stop_pkg_monitor(void) { }
-#endif /* SUSFS_FSNOTIFY_COMPAT */
-"""
-open(p, 'w').write(s)
-print('[+] wrapped with version guard')
-PYEOF
-    echo "[+] pkg_observer.c patched for $kver"
+    cp "$f" "${f}.orig"
+
+    cat > "$f" <<'PKG_EOF'
+// SPDX-License-Identifier: GPL-2.0
+/* SUSFS_FSNOTIFY_COMPAT_V2: pre-5.9 compatible version */
+#include <linux/module.h>
+#include <linux/fs.h>
+#include <linux/namei.h>
+#include <linux/fsnotify_backend.h>
+#include <linux/slab.h>
+#include <linux/rculist.h>
+#include <linux/version.h>
+#include "klog.h"
+#include "throne_tracker.h"
+#include "runtime/ksud_boot.h"
+
+#define MASK_SYSTEM (FS_CREATE | FS_MOVE | FS_EVENT_ON_CHILD)
+#define MASK_ADB (FS_CLOSE_WRITE | FS_MOVE | FS_DELETE | FS_EVENT_ON_CHILD)
+
+struct watch_dir {
+	const char *path;
+	u32 mask;
+	struct path kpath;
+	struct inode *inode;
+	struct fsnotify_mark *mark;
+};
+
+static struct fsnotify_group *g;
+
+#include "pkg_observer_defs.h"
+
+static KSU_DECL_FSNOTIFY_OPS(ksu_handle_inode_event)
+{
+	if (!file_name)
+		return 0;
+	if (mask & FS_ISDIR)
+		return 0;
+	if (ksu_fname_len(file_name) == 13 &&
+	    !memcmp(ksu_fname_arg(file_name), "packages.list", 13)) {
+		pr_info("packages.list detected: %d\n", mask);
+		track_throne(false);
+	}
+	if (ksu_fname_len(file_name) == 4 &&
+	    !memcmp(ksu_fname_arg(file_name), "ksud", 4)) {
+		if (mask & (FS_CLOSE_WRITE | FS_MOVED_TO))
+			ksu_set_ksud_present(true);
+		else if (mask & (FS_DELETE | FS_MOVED_FROM))
+			ksu_set_ksud_present(false);
+	}
+	return 0;
+}
+
+static const struct fsnotify_ops ksu_ops = {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+	.handle_inode_event = ksu_handle_inode_event,
+#else
+	.handle_event = ksu_handle_inode_event,
+#endif
+};
+
+static void __maybe_unused m_free(struct fsnotify_mark *m)
+{
+	if (m)
+		kfree(m);
+}
+
+static int add_mark_on_inode(struct inode *inode, u32 mask,
+			     struct fsnotify_mark **out)
+{
+	struct fsnotify_mark *m;
+	int ret;
+
+	m = kzalloc(sizeof(*m), GFP_KERNEL);
+	if (!m)
+		return -ENOMEM;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
+	fsnotify_init_mark(m, g);
+	m->mask = mask;
+	ret = fsnotify_add_inode_mark(m, inode, 0);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
+	fsnotify_init_mark(m, g);
+	m->mask = mask;
+	ret = fsnotify_add_mark(m, inode, NULL, 0);
+#else
+	fsnotify_init_mark(m, m_free);
+	m->mask = mask;
+	ret = fsnotify_add_mark(m, g, inode, NULL, 0);
+#endif
+
+	if (ret) {
+		fsnotify_put_mark(m);
+		return -EINVAL;
+	}
+	*out = m;
+	return 0;
+}
+
+static int watch_one_dir(struct watch_dir *wd)
+{
+	int ret = kern_path(wd->path, LOOKUP_FOLLOW, &wd->kpath);
+	if (ret) {
+		pr_info("path not ready: %s (%d)\n", wd->path, ret);
+		return ret;
+	}
+	wd->inode = d_inode(wd->kpath.dentry);
+	ihold(wd->inode);
+
+	ret = add_mark_on_inode(wd->inode, wd->mask, &wd->mark);
+	if (ret) {
+		pr_err("Add mark failed for %s (%d)\n", wd->path, ret);
+		path_put(&wd->kpath);
+		iput(wd->inode);
+		wd->inode = NULL;
+		return ret;
+	}
+	pr_info("watching %s\n", wd->path);
+	return 0;
+}
+
+static void unwatch_one_dir(struct watch_dir *wd)
+{
+	if (wd->mark) {
+		fsnotify_destroy_mark(wd->mark, g);
+		fsnotify_put_mark(wd->mark);
+		wd->mark = NULL;
+	}
+	if (wd->inode) {
+		iput(wd->inode);
+		wd->inode = NULL;
+	}
+	if (wd->kpath.dentry) {
+		path_put(&wd->kpath);
+		memset(&wd->kpath, 0, sizeof(wd->kpath));
+	}
+}
+
+static struct watch_dir g_watch = { .path = "/data/system",
+				    .mask = MASK_SYSTEM };
+static struct watch_dir g_adb_watch = { .path = "/data/adb",
+					.mask = MASK_ADB };
+
+int ksu_observer_init(void)
+{
+	int ret = 0;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	g = fsnotify_alloc_group(&ksu_ops, 0);
+#else
+	g = fsnotify_alloc_group(&ksu_ops);
+#endif
+	if (IS_ERR(g))
+		return PTR_ERR(g);
+
+	ret = watch_one_dir(&g_watch);
+	watch_one_dir(&g_adb_watch);
+	pr_info("observer init done\n");
+	return 0;
+}
+
+void __exit ksu_observer_exit(void)
+{
+	unwatch_one_dir(&g_adb_watch);
+	unwatch_one_dir(&g_watch);
+	fsnotify_put_group(g);
+	pr_info("observer exit done\n");
+}
+PKG_EOF
+
+    # 立刻验证
+    if grep -q 'LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)' "$f" \
+       && grep -q 'SUSFS_FSNOTIFY_COMPAT_V2' "$f"; then
+        echo "[+] pkg_observer.c replaced (lines: $(wc -l < "$f"))"
+    else
+        echo "[-] Replacement verification failed; restoring backup"
+        mv "${f}.orig" "$f"
+        return 1
+    fi
 }

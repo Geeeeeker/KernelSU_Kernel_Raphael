@@ -170,9 +170,6 @@ jobs:
 
       - name: Fetch kernel source
         run: bash scripts/source.sh
-
-      - name: Apply kernel patches
-        run: bash scripts/patches.sh all
         
       # ⬇️ 新增：编译前修复 fair.c + 添加 rtl8188eus
       - name: Apply user fixes and drivers

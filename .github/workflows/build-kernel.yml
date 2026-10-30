@@ -171,6 +171,21 @@ jobs:
       - name: Fetch kernel source
         run: bash scripts/source.sh
 
+      - name: 🧹 Clean kernel source tree
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+          
+          # 1. 彻底移除 drivers/kernelsu（无论它是目录还是符号链接）
+          rm -rf drivers/kernelsu
+          
+          # 2. 移除根目录下残留的 KernelSU、补丁仓库和 AnyKernel3
+          rm -rf KernelSU NonGKI_Kernel_Patches AnyKernel3
+          
+          # 3. 取消可能存在的 Git 对符号链接的追踪（如果它曾被意外提交）
+          git rm --cached drivers/kernelsu 2>/dev/null || true
+          
+          echo "[+] Kernel source tree cleaned for a fresh integration."
+          
       - name: Install KernelSU
         if: env.KSU_VARIANT != 'none'
         run: bash scripts/kernelsu.sh

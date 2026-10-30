@@ -177,7 +177,11 @@ jobs:
 
       - name: Apply kernel patches
         run: bash scripts/patches.sh all
-
+        
+      # ⬇️ 新增：编译前修复 fair.c + 添加 rtl8188eus
+      - name: Apply user fixes and drivers
+        run: bash scripts/user.sh
+        
       - name: Set up ccache
         if: env.ENABLE_CCACHE == 'true'
         uses: hendrikmuhs/ccache-action@v1.2
@@ -188,6 +192,10 @@ jobs:
       - name: Build kernel
         run: bash scripts/build.sh all
 
+      # ⬇️ 新增：编译内核模块 + 用户态工具（依赖 out/.config）
+      - name: Build USB/IP modules and userspace tools
+        run: bash scripts/usbip.sh
+        
       - name: Package artifacts
         run: bash scripts/package.sh all
 
@@ -204,6 +212,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload kernel image
+        if: env.UPLOAD_KERNEL_IMAGE == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.KERNEL_IMAGE_NAME }}${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
@@ -211,6 +220,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload AnyKernel3
+        if: hashFiles('kernel_workspace/AnyKernel3/**') != ''
         uses: actions/upload-artifact@v4
         with:
           name: AnyKernel3${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
@@ -218,27 +228,33 @@ jobs:
           if-no-files-found: error
 
       - name: Upload DTBO image
-        if: env.CHECK_DTBO_IS_OK == 'true'
+        if: env.UPLOAD_DTBO == 'true' && hashFiles('kernel_workspace/android-kernel/out/arch/arm64/boot/dtbo.img') != ''
         uses: actions/upload-artifact@v4
         with:
           name: dtbo-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
           path: kernel_workspace/android-kernel/out/arch/${{ env.ARCH }}/boot/dtbo.img
 
       - name: Upload boot image
-        if: env.MAKE_BOOT_IMAGE_IS_OK == 'true'
+        if: hashFiles('kernel_workspace/boot.img') != ''
         uses: actions/upload-artifact@v4
         with:
           name: boot${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
           path: kernel_workspace/boot.img
 
       - name: Upload real kernel config
-        if: env.ENABLE_STOCKCONFIG == 'true'
+        if: env.ENABLE_STOCKCONFIG == 'true' && hashFiles('kernel_workspace/android-kernel/out/.config') != ''
         uses: actions/upload-artifact@v4
         with:
           name: config${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
           path: kernel_workspace/android-kernel/out/.config
           include-hidden-files: true
-
+          
+      - name: Upload USB/IP bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: usbip-arm64-bundle
+          path: usbip-arm64-bundle.tar.gz
+          
   # Publishing is a separate job so the build itself runs with a read-only
   # token; only this job gets contents:write, and only when asked for.
   release:
